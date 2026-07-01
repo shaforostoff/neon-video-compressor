@@ -19,7 +19,7 @@ import java.util.Locale;
 
 public class ProgressActivity extends AppCompatActivity {
 
-    private TextView txtPhase, txtPercent, txtTime, txtSpeed;
+    private TextView txtBatch, txtPhase, txtPercent, txtTime, txtSpeed;
     private ProgressBar progressBar;
     private MaterialButton btnPauseResume, btnCancel;
 
@@ -48,6 +48,7 @@ public class ProgressActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_progress);
 
+        txtBatch = findViewById(R.id.txtBatch);
         txtPhase = findViewById(R.id.txtPhase);
         txtPercent = findViewById(R.id.txtPercent);
         txtTime = findViewById(R.id.txtTime);
@@ -87,7 +88,8 @@ public class ProgressActivity extends AppCompatActivity {
     }
 
     private void render(ConversionService.Snapshot s) {
-        int percent = Math.round(s.overall * 100);
+        boolean batch = s.batchTotal > 1;
+        int percent = Math.round(s.batchFraction() * 100);
         progressBar.setProgress(percent);
         txtPercent.setText(percent + "%");
 
@@ -95,6 +97,14 @@ public class ProgressActivity extends AppCompatActivity {
             case RUNNING:
             case PAUSED:
                 paused = s.status == ConversionService.Status.PAUSED;
+                if (batch) {
+                    String name = s.currentName != null ? ": " + s.currentName : "";
+                    txtBatch.setVisibility(View.VISIBLE);
+                    txtBatch.setText(String.format(Locale.US, "File %d of %d%s",
+                            s.batchIndex + 1, s.batchTotal, name));
+                } else {
+                    txtBatch.setVisibility(View.GONE);
+                }
                 txtPhase.setText(phaseLabel(s) + (paused ? " (paused)" : ""));
                 txtTime.setText(formatTime(s.processedUs) + " / " + formatTime(s.durationUs));
                 txtSpeed.setText(s.speed > 0
@@ -105,17 +115,19 @@ public class ProgressActivity extends AppCompatActivity {
                 break;
             case DONE:
                 finishedState = true;
-                txtPhase.setText("Done");
+                txtBatch.setVisibility(View.GONE);
+                txtPhase.setText(batch ? "Batch complete" : "Done");
                 txtTime.setText(s.message != null ? s.message : "");
-                boolean audioOnly = s.message != null && s.message.endsWith(".m4a");
-                String savedTo = audioOnly ? "Saved to Music" : "Saved to Movies";
+                String savedTo = s.audioOnly ? "Saved to Music" : "Saved to Movies";
                 txtSpeed.setText(savedTo);
                 btnPauseResume.setEnabled(false);
                 btnCancel.setText("Close");
-                Toast.makeText(this, savedTo, Toast.LENGTH_LONG).show();
+                Toast.makeText(this, s.message != null ? s.message : savedTo,
+                        Toast.LENGTH_LONG).show();
                 break;
             case ERROR:
                 finishedState = true;
+                txtBatch.setVisibility(View.GONE);
                 txtPhase.setText("Error");
                 txtTime.setText(s.message != null ? s.message : "Unknown error");
                 txtSpeed.setText("");
@@ -124,7 +136,9 @@ public class ProgressActivity extends AppCompatActivity {
                 break;
             case CANCELLED:
                 finishedState = true;
+                txtBatch.setVisibility(View.GONE);
                 txtPhase.setText("Cancelled");
+                txtTime.setText(s.message != null ? s.message : "");
                 btnPauseResume.setEnabled(false);
                 btnCancel.setText("Close");
                 break;

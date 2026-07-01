@@ -8,13 +8,16 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
+import android.provider.OpenableColumns;
 
 import androidx.core.app.NotificationCompat;
 
@@ -25,10 +28,13 @@ import com.shaforostoff.neonvideocompressor.engine.ConversionJob;
 import com.shaforostoff.neonvideocompressor.engine.JobControl;
 import com.shaforostoff.neonvideocompressor.engine.Options;
 
+import java.util.ArrayList;
+
 /**
- * Foreground service that runs a conversion on a worker thread so it keeps going
- * while the user switches apps, and exposes pause / resume / cancel both through
- * a bound API (for the UI) and notification actions.
+ * Foreground service that converts a queue of videos on a worker thread so it
+ * keeps going while the user switches apps, and exposes pause / resume / cancel
+ * both through a bound API (for the UI) and notification actions. Files are
+ * processed one after another; cancel aborts the whole batch.
  */
 public class ConversionService extends Service implements ConversionJob.Listener {
 
@@ -37,7 +43,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
     public static final String ACTION_RESUME = "resume";
     public static final String ACTION_CANCEL = "cancel";
 
-    public static final String EXTRA_INPUT_URI = "input_uri";
+    public static final String EXTRA_INPUT_URIS = "input_uris";
     public static final String EXTRA_OPTIONS = "options";
 
     private static final String CHANNEL_ID = "conversion";
@@ -52,9 +58,23 @@ public class ConversionService extends Service implements ConversionJob.Listener
         public long processedUs;
         public long durationUs;
         public double speed;
-        public float overall;
+        public float overall;          // fraction of the current file [0,1]
         public String message;
         public Uri output;
+
+        // Batch state
+        public int batchIndex;         // 0-based index of the file being processed
+        public int batchTotal = 1;     // number of files in the batch
+        public int succeeded;
+        public int failed;
+        public String currentName;     // display name of the current source file
+        public boolean audioOnly;      // output has no video track (.m4a)
+
+        /** Progress across the whole batch, factoring in completed files. */
+        public float batchFraction() {
+            if (batchTotal <= 1) return overall;
+            return Math.max(0f, Math.min(1f, (batchIndex + overall) / batchTotal));
+        }
     }
 
     public interface UiCallback {
@@ -65,9 +85,17 @@ public class ConversionService extends Service implements ConversionJob.Listener
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Snapshot snapshot = new Snapshot();
 
+    private final Object controlLock = new Object();
     private JobControl control;
     private Thread worker;
+    private PowerManager.WakeLock wakeLock;
+    private volatile boolean batchCancelled;
     private long lastNotifMs = 0;
+
+    // Aggregated results across the batch.
+    private Uri lastOutput;
+    private String lastDisplayName;
+    private String lastError;
 
     public class LocalBinder extends Binder {
         public ConversionService getService() {
@@ -81,6 +109,12 @@ public class ConversionService extends Service implements ConversionJob.Listener
     }
 
     @Override
+    public void onDestroy() {
+        super.onDestroy();
+        releaseWakeLock();
+    }
+
+    @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent != null ? intent.getAction() : null;
         if (action == null) return START_NOT_STICKY;
@@ -90,52 +124,70 @@ public class ConversionService extends Service implements ConversionJob.Listener
                 handleStart(intent);
                 break;
             case ACTION_PAUSE:
-                if (control != null) {
-                    control.setPaused(true);
-                    snapshot.status = Status.PAUSED;
-                    pushUpdate(true);
-                }
+                pause();
                 break;
             case ACTION_RESUME:
-                if (control != null) {
-                    control.setPaused(false);
-                    snapshot.status = Status.RUNNING;
-                    pushUpdate(true);
-                }
+                resume();
                 break;
             case ACTION_CANCEL:
-                if (control != null) control.cancel();
+                cancel();
                 break;
         }
         return START_NOT_STICKY;
     }
 
-    @SuppressWarnings("deprecation")
     private void handleStart(Intent intent) {
         if (worker != null) return; // already running
 
-        Uri input = intent.getParcelableExtra(EXTRA_INPUT_URI);
+        ArrayList<Uri> inputs = intent.getParcelableArrayListExtra(EXTRA_INPUT_URIS);
         Options options = (Options) intent.getSerializableExtra(EXTRA_OPTIONS);
-        if (input == null || options == null) {
+        if (inputs == null || inputs.isEmpty() || options == null) {
             stopSelf();
             return;
         }
 
         createChannel();
-        startForegroundCompat(buildProgressNotification());
-
-        control = new JobControl();
         snapshot.status = Status.RUNNING;
+        snapshot.batchTotal = inputs.size();
+        snapshot.batchIndex = 0;
+        snapshot.audioOnly = options.removesVideo();
+        startForegroundCompat(buildProgressNotification());
+        acquireWakeLock();
 
-        ConversionJob job = new ConversionJob(this, input, options, control, this);
-        worker = new Thread(() -> {
+        worker = new Thread(() -> runBatch(inputs, options), "conversion-worker");
+        worker.start();
+    }
+
+    private void runBatch(ArrayList<Uri> inputs, Options options) {
+        for (int i = 0; i < inputs.size(); i++) {
+            if (batchCancelled) break;
+
+            Uri input = inputs.get(i);
+            snapshot.batchIndex = i;
+            snapshot.overall = 0f;
+            snapshot.speed = 0;
+            snapshot.currentName = queryName(input);
+            snapshot.status = Status.RUNNING;
+            pushUpdate(true);
+
+            JobControl c = new JobControl();
+            synchronized (controlLock) {
+                control = c;
+            }
+            ConversionJob job = new ConversionJob(this, input, options, c, this);
             try {
                 job.run();
+            } catch (Throwable t) {
+                snapshot.failed++;
+                lastError = t.getMessage() != null ? t.getMessage() : t.toString();
             } finally {
-                control.destroy();
+                synchronized (controlLock) {
+                    c.destroy();
+                    if (control == c) control = null;
+                }
             }
-        }, "conversion-worker");
-        worker.start();
+        }
+        finishBatch(options);
     }
 
     // --- ConversionJob.Listener (called on the worker thread) ---------------
@@ -143,7 +195,11 @@ public class ConversionService extends Service implements ConversionJob.Listener
     @Override
     public void onProgress(ConversionJob.Phase phase, long processedUs, long durationUs,
                            double speed, float overall) {
-        snapshot.status = control != null && control.paused ? Status.PAUSED : Status.RUNNING;
+        boolean paused;
+        synchronized (controlLock) {
+            paused = control != null && control.paused;
+        }
+        snapshot.status = paused ? Status.PAUSED : Status.RUNNING;
         snapshot.phase = phase;
         snapshot.processedUs = processedUs;
         snapshot.durationUs = durationUs;
@@ -154,36 +210,87 @@ public class ConversionService extends Service implements ConversionJob.Listener
 
     @Override
     public void onCompleted(Uri output, String displayName) {
-        snapshot.status = Status.DONE;
+        snapshot.succeeded++;
         snapshot.overall = 1f;
-        snapshot.output = output;
-        snapshot.message = displayName;
-        finish(buildDoneNotification("Saved " + displayName, output));
+        lastOutput = output;
+        lastDisplayName = displayName;
+        pushUpdate(true);
     }
 
     @Override
     public void onError(String message) {
-        snapshot.status = Status.ERROR;
-        snapshot.message = message;
-        finish(buildDoneNotification("Conversion failed: " + message, null));
+        snapshot.failed++;
+        lastError = message;
+        pushUpdate(true);
     }
 
     @Override
     public void onCancelled() {
-        snapshot.status = Status.CANCELLED;
-        snapshot.message = "Cancelled";
-        finish(null);
+        // Reached only when the current job is cancelled, which happens via the
+        // user-driven cancel() — abort the rest of the batch too.
+        batchCancelled = true;
+        pushUpdate(true);
     }
 
-    private void finish(Notification finalNotification) {
-        pushUpdate(true);
+    private void finishBatch(Options options) {
         worker = null;
+        int total = snapshot.batchTotal;
+        int ok = snapshot.succeeded;
+        int bad = snapshot.failed;
+
+        Status finalStatus;
+        String summary;
+        if (batchCancelled) {
+            finalStatus = Status.CANCELLED;
+            summary = "Cancelled — " + ok + " of " + total + " done";
+        } else if (bad == 0) {
+            finalStatus = Status.DONE;
+            summary = total == 1
+                    ? "Saved " + lastDisplayName
+                    : "Converted " + ok + " videos";
+        } else if (ok == 0) {
+            finalStatus = Status.ERROR;
+            summary = total == 1
+                    ? "Conversion failed: " + lastError
+                    : "All " + bad + " conversions failed";
+        } else {
+            finalStatus = Status.DONE; // partial success
+            summary = "Converted " + ok + " of " + total + " (" + bad + " failed)";
+        }
+
+        snapshot.status = finalStatus;
+        snapshot.overall = 1f;
+        snapshot.message = summary;
+        snapshot.output = lastOutput;
+
+        pushUpdate(true);
+        releaseWakeLock();
         stopForeground(STOP_FOREGROUND_REMOVE);
-        if (finalNotification != null) {
+        if (finalStatus != Status.CANCELLED) {
             NotificationManager nm = getSystemService(NotificationManager.class);
-            nm.notify(NOTIF_ID + 1, finalNotification);
+            if (nm != null) nm.notify(NOTIF_ID + 1, buildDoneNotification(summary, lastOutput));
         }
         stopSelf();
+    }
+
+    @SuppressWarnings("WakelockTimeout")
+    private void acquireWakeLock() {
+        if (wakeLock != null) return;
+        PowerManager pm = getSystemService(PowerManager.class);
+        if (pm == null) return;
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
+                "NeonVideoCompressor:conversion");
+        wakeLock.setReferenceCounted(false);
+        // Long encodes can run for hours; cap the lock so a crashed/leaked hold
+        // can't keep the CPU awake forever. finishBatch() releases it normally.
+        wakeLock.acquire(6 * 60 * 60 * 1000L /* 6h */);
+    }
+
+    private void releaseWakeLock() {
+        if (wakeLock != null) {
+            if (wakeLock.isHeld()) wakeLock.release();
+            wakeLock = null;
+        }
     }
 
     // --- bound API ----------------------------------------------------------
@@ -201,23 +308,30 @@ public class ConversionService extends Service implements ConversionJob.Listener
     }
 
     public void pause() {
-        if (control != null) {
-            control.setPaused(true);
-            snapshot.status = Status.PAUSED;
-            pushUpdate(true);
+        synchronized (controlLock) {
+            if (control != null) {
+                control.setPaused(true);
+                snapshot.status = Status.PAUSED;
+            }
         }
+        pushUpdate(true);
     }
 
     public void resume() {
-        if (control != null) {
-            control.setPaused(false);
-            snapshot.status = Status.RUNNING;
-            pushUpdate(true);
+        synchronized (controlLock) {
+            if (control != null) {
+                control.setPaused(false);
+                snapshot.status = Status.RUNNING;
+            }
         }
+        pushUpdate(true);
     }
 
     public void cancel() {
-        if (control != null) control.cancel();
+        batchCancelled = true;
+        synchronized (controlLock) {
+            if (control != null) control.cancel();
+        }
     }
 
     // --- updates / notifications -------------------------------------------
@@ -250,7 +364,21 @@ public class ConversionService extends Service implements ConversionJob.Listener
 
     private Notification buildProgressNotification() {
         boolean paused = snapshot.status == Status.PAUSED;
-        int percent = Math.round(snapshot.overall * 100);
+        boolean batch = snapshot.batchTotal > 1;
+        int percent = Math.round(snapshot.batchFraction() * 100);
+
+        String title;
+        if (batch) {
+            title = (paused ? "Paused" : "Converting")
+                    + " · " + (snapshot.batchIndex + 1) + "/" + snapshot.batchTotal;
+        } else {
+            title = paused ? "Conversion paused" : "Converting video";
+        }
+
+        String text = phaseLabel(snapshot.phase) + " · " + percent + "%";
+        if (batch && snapshot.currentName != null) {
+            text = snapshot.currentName + " · " + phaseLabel(snapshot.phase);
+        }
 
         PendingIntent content = PendingIntent.getActivity(this, 0,
                 new Intent(this, ProgressActivity.class)
@@ -259,8 +387,8 @@ public class ConversionService extends Service implements ConversionJob.Listener
 
         NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_convert)
-                .setContentTitle(paused ? "Conversion paused" : "Converting video")
-                .setContentText(phaseLabel(snapshot.phase) + " · " + percent + "%")
+                .setContentTitle(title)
+                .setContentText(text)
                 .setProgress(100, percent, false)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
@@ -276,8 +404,9 @@ public class ConversionService extends Service implements ConversionJob.Listener
     }
 
     private Notification buildDoneNotification(String text, Uri output) {
+        String mime = snapshot.audioOnly ? "audio/mp4" : "video/mp4";
         Intent open = output != null
-                ? new Intent(Intent.ACTION_VIEW).setDataAndType(output, "video/mp4")
+                ? new Intent(Intent.ACTION_VIEW).setDataAndType(output, mime)
                         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 : new Intent(this, MainActivity.class);
         PendingIntent pi = PendingIntent.getActivity(this, 2, open,
@@ -308,6 +437,18 @@ public class ConversionService extends Service implements ConversionJob.Listener
         }
     }
 
+    private String queryName(Uri uri) {
+        try (Cursor c = getContentResolver().query(
+                uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) return c.getString(idx);
+            }
+        } catch (Exception ignored) {
+        }
+        return uri.getLastPathSegment();
+    }
+
     private static String phaseLabel(ConversionJob.Phase phase) {
         switch (phase) {
             case VIDEO:
@@ -323,10 +464,10 @@ public class ConversionService extends Service implements ConversionJob.Listener
         }
     }
 
-    public static void start(Context ctx, Uri input, Options options) {
+    public static void start(Context ctx, ArrayList<Uri> inputs, Options options) {
         Intent i = new Intent(ctx, ConversionService.class)
                 .setAction(ACTION_START)
-                .putExtra(EXTRA_INPUT_URI, input)
+                .putParcelableArrayListExtra(EXTRA_INPUT_URIS, inputs)
                 .putExtra(EXTRA_OPTIONS, options);
         ctx.startForegroundService(i);
     }

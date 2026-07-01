@@ -1,0 +1,20 @@
+Copyright (c) Mykola Shaforostov
+
+https://github.com/shaforostoff/neon-video-compressor
+
+Neon Video Compressor re-encodes video files on your device to reduce their file size, using the HEVC (H.265) codec for video and AAC for audio. All conversion happens locally — your files are never uploaded anywhere.
+
+You can choose to re-encode, copy without re-encoding, or remove the video and/or audio track independently, and control quality and speed via the CRF and preset settings.
+
+Open-source software used in this app:
+
+FFmpeg
+https://ffmpeg.org
+Licensed under the GNU General Public License v2 or later.
+
+x265
+https://www.videolan.org/developers/x265.html
+Licensed under the GNU General Public License v2 or later.
+
+Because this app statically links GPL-licensed components, it is distributed under the terms of the GNU General Public License v2 or later. A copy of the license can be found at:
+https://www.gnu.org/licenses/gpl-2.0.html

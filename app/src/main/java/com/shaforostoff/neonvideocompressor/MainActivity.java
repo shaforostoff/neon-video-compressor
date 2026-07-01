@@ -14,12 +14,20 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
 import com.google.android.material.button.MaterialButton;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.shaforostoff.neonvideocompressor.engine.Options;
 import com.shaforostoff.neonvideocompressor.service.ConversionService;
 
@@ -27,7 +35,7 @@ import java.util.Locale;
 
 public class MainActivity extends AppCompatActivity {
 
-    private Uri selectedUri;
+    private final ArrayList<Uri> selectedUris = new ArrayList<>();
 
     private TextView txtFile, txtCrf;
     private SeekBar seekCrf;
@@ -38,8 +46,8 @@ public class MainActivity extends AppCompatActivity {
     private int[] bitrateValues;
 
     private final ActivityResultLauncher<String[]> picker =
-            registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
-                if (uri != null) onVideoPicked(uri);
+            registerForActivityResult(new ActivityResultContracts.OpenMultipleDocuments(), uris -> {
+                if (uris != null && !uris.isEmpty()) onVideosPicked(uris);
             });
 
     private final ActivityResultLauncher<String> notifPermission =
@@ -90,17 +98,58 @@ public class MainActivity extends AppCompatActivity {
         ((MaterialButton) findViewById(R.id.btnSelect)).setOnClickListener(v ->
                 picker.launch(new String[]{"video/*"}));
         btnConvert.setOnClickListener(v -> onConvertClicked());
+        ((MaterialButton) findViewById(R.id.btnAbout)).setOnClickListener(v -> showAboutDialog());
     }
 
-    private void onVideoPicked(Uri uri) {
-        selectedUri = uri;
-        try {
-            getContentResolver().takePersistableUriPermission(
-                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        } catch (Exception ignored) {
+    private void showAboutDialog() {
+        TextView message = new TextView(this);
+        message.setText(readAsset("about.txt"));
+        int pad = (int) (20 * getResources().getDisplayMetrics().density);
+        message.setPadding(pad, pad, pad, pad);
+        message.setTextIsSelectable(true);
+
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(message);
+
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.about_title)
+                .setView(scroll)
+                .setPositiveButton(R.string.done, null)
+                .show();
+    }
+
+    private String readAsset(String name) {
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(
+                getAssets().open(name), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                if (sb.length() > 0) sb.append('\n');
+                sb.append(line);
+            }
+        } catch (IOException e) {
+            return "";
         }
-        txtFile.setText(describe(uri));
-        btnConvert.setEnabled(true);
+        return sb.toString();
+    }
+
+    private void onVideosPicked(List<Uri> uris) {
+        selectedUris.clear();
+        selectedUris.addAll(uris);
+        for (Uri uri : uris) {
+            try {
+                getContentResolver().takePersistableUriPermission(
+                        uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Exception ignored) {
+            }
+        }
+        if (selectedUris.size() == 1) {
+            txtFile.setText(describe(selectedUris.get(0)));
+        } else {
+            txtFile.setText(String.format(Locale.US,
+                    getString(R.string.videos_selected), selectedUris.size()));
+        }
+        btnConvert.setEnabled(!selectedUris.isEmpty());
     }
 
     private String describe(Uri uri) {
@@ -134,7 +183,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onConvertClicked() {
-        if (selectedUri == null) return;
+        if (selectedUris.isEmpty()) return;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED) {
@@ -145,7 +194,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startConversion() {
-        if (selectedUri == null) return;
+        if (selectedUris.isEmpty()) return;
         Options o = new Options();
         switch (spVideoMode.getSelectedItemPosition()) {
             case 0: o.videoMode = Options.VideoMode.ENCODE_HEVC; break;
@@ -167,7 +216,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        ConversionService.start(this, selectedUri, o);
+        ConversionService.start(this, new ArrayList<>(selectedUris), o);
         startActivity(new Intent(this, ProgressActivity.class));
     }
 

@@ -7,6 +7,15 @@
     android:padding="24dp">
 
     <TextView
+        android:id="@+id/txtBatch"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="4dp"
+        android:textAppearance="?attr/textAppearanceLabelLarge"
+        android:textColor="?android:attr/textColorSecondary"
+        android:visibility="gone" />
+
+    <TextView
         android:id="@+id/txtPhase"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
