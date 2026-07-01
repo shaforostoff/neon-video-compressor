@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Neon light theme: bright signage colors toned down to deep, saturated
+         shades so they stay readable on a light surface. -->
+    <color name="neon_primary">#D6007F</color>
+    <color name="neon_on_primary">#FFFFFF</color>
+    <color name="neon_primary_container">#FFD8EC</color>
+    <color name="neon_on_primary_container">#3A0020</color>
+
+    <color name="neon_secondary">#0089A8</color>
+    <color name="neon_on_secondary">#FFFFFF</color>
+    <color name="neon_secondary_container">#C6F1FA</color>
+    <color name="neon_on_secondary_container">#00272E</color>
+
+    <color name="neon_tertiary">#7C3AED</color>
+    <color name="neon_on_tertiary">#FFFFFF</color>
+    <color name="neon_tertiary_container">#EAE0FF</color>
+    <color name="neon_on_tertiary_container">#26006B</color>
+
+    <color name="neon_error">#E8004C</color>
+    <color name="neon_on_error">#FFFFFF</color>
+    <color name="neon_error_container">#FFD9E1</color>
+    <color name="neon_on_error_container">#400012</color>
+
+    <color name="neon_background">#FCFAFF</color>
+    <color name="neon_on_background">#1B1B1F</color>
+    <color name="neon_surface">#FCFAFF</color>
+    <color name="neon_on_surface">#1B1B1F</color>
+    <color name="neon_surface_variant">#ECE0EB</color>
+    <color name="neon_on_surface_variant">#4D4550</color>
+    <color name="neon_outline">#7F747C</color>
+
+    <color name="ic_launcher_background">#000000</color>
+</resources>

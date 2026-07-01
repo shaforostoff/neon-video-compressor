@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <!-- Zoom knob: larger inset = smaller icon (more black rim); smaller inset = bigger (risks
+         edge clipping by circular launcher masks). 14dp verified clean on-device; 18dp matches
+         Android's guaranteed-visible 72dp viewport exactly. -->
+    <foreground>
+        <inset
+            android:drawable="@mipmap/ic_launcher_foreground"
+            android:inset="14dp" />
+    </foreground>
+</adaptive-icon>

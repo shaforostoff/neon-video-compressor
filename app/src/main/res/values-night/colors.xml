@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Neon night theme: full-brightness signage colors glowing on a
+         near-black surface. -->
+    <color name="neon_primary">#FF3DBF</color>
+    <color name="neon_on_primary">#5C0040</color>
+    <color name="neon_primary_container">#7D0057</color>
+    <color name="neon_on_primary_container">#FFD6EF</color>
+
+    <color name="neon_secondary">#00E5FF</color>
+    <color name="neon_on_secondary">#00363D</color>
+    <color name="neon_secondary_container">#004E59</color>
+    <color name="neon_on_secondary_container">#97F0FF</color>
+
+    <color name="neon_tertiary">#B26BFF</color>
+    <color name="neon_on_tertiary">#3B0075</color>
+    <color name="neon_tertiary_container">#54039A</color>
+    <color name="neon_on_tertiary_container">#EBD9FF</color>
+
+    <color name="neon_error">#FF4D6D</color>
+    <color name="neon_on_error">#680019</color>
+    <color name="neon_error_container">#93002A</color>
+    <color name="neon_on_error_container">#FFD9DF</color>
+
+    <color name="neon_background">#0A0A0F</color>
+    <color name="neon_on_background">#E8E2E9</color>
+    <color name="neon_surface">#0A0A0F</color>
+    <color name="neon_on_surface">#E8E2E9</color>
+    <color name="neon_surface_variant">#1E1B22</color>
+    <color name="neon_on_surface_variant">#C9C1CE</color>
+    <color name="neon_outline">#8A8390</color>
+</resources>

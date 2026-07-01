@@ -1,0 +1,4 @@
+/build
+src/main/cpp/prebuilt/*/lib/
+src/main/cpp/prebuilt/*/share/
+src/main/cpp/prebuilt/*/include/
