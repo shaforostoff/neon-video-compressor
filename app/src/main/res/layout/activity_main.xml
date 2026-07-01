@@ -14,6 +14,7 @@
             android:id="@+id/btnSelect"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="32dp"
             android:text="@string/select_video" />
 
         <TextView
@@ -103,10 +104,19 @@
         </LinearLayout>
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnConvert"
+            android:id="@+id/btnPreview"
+            style="?attr/materialButtonOutlinedStyle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="32dp"
+            android:enabled="false"
+            android:text="@string/preview" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnConvert"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
             android:enabled="false"
             android:text="@string/convert" />
 

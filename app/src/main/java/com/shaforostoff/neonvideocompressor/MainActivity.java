@@ -41,7 +41,7 @@ public class MainActivity extends AppCompatActivity {
     private SeekBar seekCrf;
     private Spinner spVideoMode, spPreset, spAudioMode, spAudioBitrate;
     private View videoEncodeOptions, audioEncodeOptions;
-    private MaterialButton btnConvert;
+    private MaterialButton btnConvert, btnPreview;
 
     private int[] bitrateValues;
 
@@ -69,6 +69,7 @@ public class MainActivity extends AppCompatActivity {
         videoEncodeOptions = findViewById(R.id.videoEncodeOptions);
         audioEncodeOptions = findViewById(R.id.audioEncodeOptions);
         btnConvert = findViewById(R.id.btnConvert);
+        btnPreview = findViewById(R.id.btnPreview);
 
         bitrateValues = getResources().getIntArray(R.array.audio_bitrate_values);
 
@@ -97,6 +98,7 @@ public class MainActivity extends AppCompatActivity {
 
         ((MaterialButton) findViewById(R.id.btnSelect)).setOnClickListener(v ->
                 picker.launch(new String[]{"video/*"}));
+        btnPreview.setOnClickListener(v -> onPreviewClicked());
         btnConvert.setOnClickListener(v -> onConvertClicked());
         ((MaterialButton) findViewById(R.id.btnAbout)).setOnClickListener(v -> showAboutDialog());
     }
@@ -149,7 +151,9 @@ public class MainActivity extends AppCompatActivity {
             txtFile.setText(String.format(Locale.US,
                     getString(R.string.videos_selected), selectedUris.size()));
         }
-        btnConvert.setEnabled(!selectedUris.isEmpty());
+        boolean any = !selectedUris.isEmpty();
+        btnConvert.setEnabled(any);
+        btnPreview.setEnabled(any);
     }
 
     private String describe(Uri uri) {
@@ -193,8 +197,8 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void startConversion() {
-        if (selectedUris.isEmpty()) return;
+    /** Reads the current spinner/seekbar selections into an {@link Options}. */
+    private Options buildOptions() {
         Options o = new Options();
         switch (spVideoMode.getSelectedItemPosition()) {
             case 0: o.videoMode = Options.VideoMode.ENCODE_HEVC; break;
@@ -210,6 +214,12 @@ public class MainActivity extends AppCompatActivity {
             default: o.audioMode = Options.AudioMode.REMOVE; break;
         }
         o.audioBitrate = bitrateValues[spAudioBitrate.getSelectedItemPosition()];
+        return o;
+    }
+
+    private void startConversion() {
+        if (selectedUris.isEmpty()) return;
+        Options o = buildOptions();
 
         if (o.removesVideo() && o.removesAudio()) {
             Toast.makeText(this, "Can't remove both video and audio", Toast.LENGTH_LONG).show();
@@ -218,6 +228,18 @@ public class MainActivity extends AppCompatActivity {
 
         ConversionService.start(this, new ArrayList<>(selectedUris), o);
         startActivity(new Intent(this, ProgressActivity.class));
+    }
+
+    private void onPreviewClicked() {
+        if (selectedUris.isEmpty()) return;
+        Options o = buildOptions();
+        // Preview compares the encoded result against the source, so it only
+        // makes sense when we're actually re-encoding the video.
+        if (!o.encodesVideo()) {
+            Toast.makeText(this, R.string.preview_needs_encode, Toast.LENGTH_LONG).show();
+            return;
+        }
+        PreviewActivity.start(this, selectedUris.get(0), o);
     }
 
     private void setupSpinner(Spinner spinner, int arrayRes, int defaultPos) {

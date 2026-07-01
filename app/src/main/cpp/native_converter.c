@@ -299,11 +299,14 @@ static int drain_encoder(AVCodecContext *enc, AVFormatContext *ofmt,
 
 // Pull all currently-available frames from the decoder, scale if needed,
 // encode them, and report progress per frame.
+// Returns <0 on error, 0 when the decoder is drained, or 1 when maxUs was
+// reached (the current frame is beyond the limit and was dropped) so the caller
+// should stop feeding input and finalize.
 static int pump_decoder(JNIEnv *env, AVCodecContext *dec, AVCodecContext *enc,
                         AVFormatContext *ofmt, AVStream *ost, AVStream *ist,
                         AVFrame *frame, AVPacket *opkt,
                         struct SwsContext **sws, AVFrame **swsFrame,
-                        int64_t *lastPts, jobject cb, jmethodID onProg) {
+                        int64_t *lastPts, int64_t maxUs, jobject cb, jmethodID onProg) {
     int ret;
     while ((ret = avcodec_receive_frame(dec, frame)) >= 0) {
         // Re-label deprecated full-range YUVJ formats as their plain equivalents.
@@ -316,6 +319,14 @@ static int pump_decoder(JNIEnv *env, AVCodecContext *dec, AVCodecContext *enc,
 
         int64_t ts = frame->best_effort_timestamp != AV_NOPTS_VALUE
                      ? frame->best_effort_timestamp : frame->pts;
+
+        // Preview mode: once we pass the requested window, drop this frame and
+        // tell the caller to finalize. Frames still buffered below the limit are
+        // flushed normally on the following (drain) pass.
+        if (maxUs > 0 && ts != AV_NOPTS_VALUE) {
+            int64_t us = av_rescale_q(ts, ist->time_base, AV_TIME_BASE_Q);
+            if (us >= maxUs) { av_frame_unref(frame); return 1; }
+        }
 
         if (cb && onProg && ts != AV_NOPTS_VALUE) {
             int64_t us = av_rescale_q(ts, ist->time_base, AV_TIME_BASE_Q);
@@ -369,7 +380,7 @@ static int pump_decoder(JNIEnv *env, AVCodecContext *dec, AVCodecContext *enc,
 JNIEXPORT jint JNICALL
 Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscodeVideo(
         JNIEnv *env, jclass clazz, jint inFd, jstring joutPath,
-        jint crf, jstring jpreset, jlong ctrlHandle, jobject cb) {
+        jint crf, jstring jpreset, jlong ctrlHandle, jlong maxDurationUs, jobject cb) {
 
     Control *ctrl = (Control *) (intptr_t) ctrlHandle;
     const char *outPath = (*env)->GetStringUTFChars(env, joutPath, NULL);
@@ -482,8 +493,9 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscode
             av_packet_unref(pkt);
             if (r < 0) { LOGE("send_packet failed: %s", av_err2str(r)); ret = RET_ERROR; goto end; }
             r = pump_decoder(env, dec, enc, ofmt, ost, ist, frame, opkt,
-                             &sws, &swsFrame, &lastPts, cb, onProg);
+                             &sws, &swsFrame, &lastPts, maxDurationUs, cb, onProg);
             if (r < 0) { LOGE("pump_decoder failed: %s", av_err2str(r)); ret = RET_ERROR; goto end; }
+            if (r == 1) break; // reached the requested preview window
         } else {
             av_packet_unref(pkt);
         }
@@ -493,7 +505,7 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscode
 
     // Flush decoder, then encoder.
     avcodec_send_packet(dec, NULL);
-    pump_decoder(env, dec, enc, ofmt, ost, ist, frame, opkt, &sws, &swsFrame, &lastPts, cb, onProg);
+    pump_decoder(env, dec, enc, ofmt, ost, ist, frame, opkt, &sws, &swsFrame, &lastPts, maxDurationUs, cb, onProg);
     avcodec_send_frame(enc, NULL);
     drain_encoder(enc, ofmt, ost, opkt);
 
@@ -690,6 +702,69 @@ end:
     }
     if (have_video) src_close(&v);
     if (have_audio) src_close(&a);
+    (*env)->ReleaseStringUTFChars(env, joutPath, outPath);
+    return ret;
+}
+
+// ---------------------------------------------------------------------------
+// nativeCopyClip: stream-copy (no re-encode) the first maxUs of the source
+// video track into outPath. Used to produce a lossless reference clip for the
+// preview A/B comparison, so the "original" side shows true source quality.
+// ---------------------------------------------------------------------------
+JNIEXPORT jint JNICALL
+Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeCopyClip(
+        JNIEnv *env, jclass clazz, jint inFd, jstring joutPath, jlong maxUs) {
+
+    const char *outPath = (*env)->GetStringUTFChars(env, joutPath, NULL);
+    int ret = RET_ERROR;
+    CopySource v = {0};
+    AVFormatContext *ofmt = NULL;
+
+    if (src_open(&v, inFd, AVMEDIA_TYPE_VIDEO) < 0) { LOGE("clip: no video stream"); goto end; }
+
+    if (avformat_alloc_output_context2(&ofmt, NULL, NULL, outPath) < 0 || !ofmt) {
+        if (avformat_alloc_output_context2(&ofmt, NULL, "mp4", outPath) < 0 || !ofmt) {
+            LOGE("clip: no output muxer for %s", outPath);
+            goto end;
+        }
+    }
+
+    v.out = avformat_new_stream(ofmt, NULL);
+    if (!v.out) goto end;
+    avcodec_parameters_copy(v.out->codecpar, v.fmt->streams[v.stream_index]->codecpar);
+    v.out->codecpar->codec_tag = 0; // let the muxer pick a valid tag
+    v.out->time_base = v.fmt->streams[v.stream_index]->time_base;
+    copy_display_matrix(v.fmt->streams[v.stream_index], v.out);
+
+    if (!(ofmt->oformat->flags & AVFMT_NOFILE)) {
+        if (avio_open(&ofmt->pb, outPath, AVIO_FLAG_WRITE) < 0) { LOGE("clip: avio_open failed"); goto end; }
+    }
+
+    AVDictionary *opts = NULL;
+    av_dict_set(&opts, "movflags", "+faststart", 0);
+    if (avformat_write_header(ofmt, &opts) < 0) {
+        LOGE("clip: write_header failed");
+        av_dict_free(&opts);
+        goto end;
+    }
+    av_dict_free(&opts);
+
+    src_next(&v);
+    while (v.has_pending) {
+        if (maxUs > 0 && src_dts_us(&v) >= maxUs) break;
+        if (src_write(&v, ofmt) < 0) goto end;
+        src_next(&v);
+    }
+
+    if (av_write_trailer(ofmt) < 0) goto end;
+    ret = RET_OK;
+
+end:
+    if (ofmt) {
+        if (ofmt->pb && !(ofmt->oformat->flags & AVFMT_NOFILE)) avio_closep(&ofmt->pb);
+        avformat_free_context(ofmt);
+    }
+    src_close(&v);
     (*env)->ReleaseStringUTFChars(env, joutPath, outPath);
     return ret;
 }

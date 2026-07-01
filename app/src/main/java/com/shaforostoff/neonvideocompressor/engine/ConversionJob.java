@@ -105,7 +105,7 @@ public class ConversionJob {
                 setPhase(Phase.VIDEO);
                 int r = NativeConverter.nativeTranscodeVideo(
                         inputFd, videoTemp.getAbsolutePath(), options.crf, options.preset,
-                        control.nativeHandle(),
+                        control.nativeHandle(), 0L /* whole file */,
                         processedUs -> report(Phase.VIDEO, processedUs));
                 if (r == NativeConverter.RET_CANCELLED || control.cancelled) {
                     listener.onCancelled();

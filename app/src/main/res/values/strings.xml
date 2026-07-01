@@ -10,6 +10,13 @@
     <string name="audio_bitrate">Audio bitrate</string>
     <string name="crf_label">Quality (CRF): %1$d</string>
     <string name="convert">Convert</string>
+    <string name="preview">Preview (first 5s)</string>
+    <string name="preview_needs_encode">Preview is only available when encoding video</string>
+    <string name="preview_encoding">Encoding preview…</string>
+    <string name="preview_hint">Hold to compare with the original</string>
+    <string name="preview_failed">Couldn\'t build preview</string>
+    <string name="label_encoded">ENCODED</string>
+    <string name="label_original">ORIGINAL</string>
 
     <string name="pause">Pause</string>
     <string name="resume">Resume</string>

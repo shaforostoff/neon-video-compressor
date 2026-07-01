@@ -40,11 +40,22 @@ public final class NativeConverter {
      * Decode the source video and encode it to HEVC (libx265) into a video-only
      * mp4 at {@code outPath}, tagged {@code hvc1}.
      *
+     * @param maxDurationUs stop after this many microseconds of source video
+     *                      (for previews); pass {@code 0} to encode the whole file.
      * @return {@link #RET_OK}, {@link #RET_CANCELLED} or {@link #RET_ERROR}
      */
     public static native int nativeTranscodeVideo(int inFd, String outPath, int crf,
                                                   String preset, long ctrlHandle,
-                                                  ProgressCallback cb);
+                                                  long maxDurationUs, ProgressCallback cb);
+
+    /**
+     * Stream-copy (no re-encode) the first {@code maxDurationUs} of the source's
+     * video track into a standalone mp4 at {@code outPath} — a lossless reference
+     * clip for the preview A/B comparison.
+     *
+     * @return {@link #RET_OK} or {@link #RET_ERROR}
+     */
+    public static native int nativeCopyClip(int inFd, String outPath, long maxDurationUs);
 
     /**
      * Stream-copy the first video stream of {@code videoFd} and the first audio
