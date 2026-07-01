@@ -2,6 +2,7 @@ package com.shaforostoff.neonvideocompressor;
 
 import android.Manifest;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
@@ -36,6 +37,15 @@ import java.util.Locale;
 public class MainActivity extends AppCompatActivity {
 
     private static final String STATE_URIS = "selected_uris";
+
+    private static final String PREFS = "settings";
+    private static final String KEY_VIDEO_MODE = "video_mode";
+    private static final String KEY_CRF = "crf";
+    private static final String KEY_PRESET = "preset";
+    private static final String KEY_AUDIO_MODE = "audio_mode";
+    private static final String KEY_AUDIO_BITRATE = "audio_bitrate";
+
+    private SharedPreferences prefs;
 
     private final ArrayList<Uri> selectedUris = new ArrayList<>();
 
@@ -75,10 +85,14 @@ public class MainActivity extends AppCompatActivity {
 
         bitrateValues = getResources().getIntArray(R.array.audio_bitrate_values);
 
-        setupSpinner(spVideoMode, R.array.video_modes, 0);
-        setupSpinner(spPreset, R.array.presets, 6 /* slow */);
-        setupSpinner(spAudioMode, R.array.audio_modes, 0);
-        setupSpinner(spAudioBitrate, R.array.audio_bitrate_labels, 2 /* 40 kbps */);
+        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+
+        // Restore the last-used encoding settings (defaults on first launch).
+        setupSpinner(spVideoMode, R.array.video_modes, prefs.getInt(KEY_VIDEO_MODE, 0));
+        setupSpinner(spPreset, R.array.presets, prefs.getInt(KEY_PRESET, 6 /* slow */));
+        setupSpinner(spAudioMode, R.array.audio_modes, prefs.getInt(KEY_AUDIO_MODE, 0));
+        setupSpinner(spAudioBitrate, R.array.audio_bitrate_labels,
+                prefs.getInt(KEY_AUDIO_BITRATE, 2 /* 40 kbps */));
 
         // Video encode options (CRF/preset) are relevant only for "Encode HEVC" (pos 0).
         spVideoMode.setOnItemSelectedListener(new SimpleSelected(pos ->
@@ -86,6 +100,12 @@ public class MainActivity extends AppCompatActivity {
         // Audio encode options (bitrate) are relevant only for the encode modes (pos 0/1).
         spAudioMode.setOnItemSelectedListener(new SimpleSelected(pos ->
                 audioEncodeOptions.setVisibility(pos <= 1 ? View.VISIBLE : View.GONE)));
+        // Apply the restored selections' visibility immediately (a listener added
+        // after setSelection doesn't get called for the already-set value).
+        videoEncodeOptions.setVisibility(
+                spVideoMode.getSelectedItemPosition() == 0 ? View.VISIBLE : View.GONE);
+        audioEncodeOptions.setVisibility(
+                spAudioMode.getSelectedItemPosition() <= 1 ? View.VISIBLE : View.GONE);
 
         seekCrf.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
@@ -96,6 +116,7 @@ public class MainActivity extends AppCompatActivity {
             @Override public void onStartTrackingTouch(SeekBar s) {}
             @Override public void onStopTrackingTouch(SeekBar s) {}
         });
+        seekCrf.setProgress(prefs.getInt(KEY_CRF, seekCrf.getProgress()));
         txtCrf.setText(String.format(Locale.US, getString(R.string.crf_label), seekCrf.getProgress()));
 
         ((MaterialButton) findViewById(R.id.btnSelect)).setOnClickListener(v ->
@@ -119,6 +140,19 @@ public class MainActivity extends AppCompatActivity {
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
         outState.putParcelableArrayList(STATE_URIS, selectedUris);
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        // Persist the encoding settings so they carry over to the next launch.
+        prefs.edit()
+                .putInt(KEY_VIDEO_MODE, spVideoMode.getSelectedItemPosition())
+                .putInt(KEY_CRF, seekCrf.getProgress())
+                .putInt(KEY_PRESET, spPreset.getSelectedItemPosition())
+                .putInt(KEY_AUDIO_MODE, spAudioMode.getSelectedItemPosition())
+                .putInt(KEY_AUDIO_BITRATE, spAudioBitrate.getSelectedItemPosition())
+                .apply();
     }
 
     private void showAboutDialog() {
