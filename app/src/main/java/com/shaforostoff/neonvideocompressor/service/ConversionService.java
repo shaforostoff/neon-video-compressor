@@ -250,9 +250,10 @@ public class ConversionService extends Service implements ConversionJob.Listener
                     : "Converted " + ok + " videos";
         } else if (ok == 0) {
             finalStatus = Status.ERROR;
+            String reason = lastError != null ? ": " + lastError : "";
             summary = total == 1
-                    ? "Conversion failed: " + lastError
-                    : "All " + bad + " conversions failed";
+                    ? "Conversion failed" + reason
+                    : "All " + bad + " conversions failed" + reason;
         } else {
             finalStatus = Status.DONE; // partial success
             summary = "Converted " + ok + " of " + total + " (" + bad + " failed)";
