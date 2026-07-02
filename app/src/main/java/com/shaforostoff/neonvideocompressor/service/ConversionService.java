@@ -22,6 +22,7 @@ import android.provider.OpenableColumns;
 import androidx.core.app.NotificationCompat;
 
 import com.shaforostoff.neonvideocompressor.MainActivity;
+import com.shaforostoff.neonvideocompressor.OutputActions;
 import com.shaforostoff.neonvideocompressor.ProgressActivity;
 import com.shaforostoff.neonvideocompressor.R;
 import com.shaforostoff.neonvideocompressor.engine.ConversionJob;
@@ -69,6 +70,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
         public int failed;
         public String currentName;     // display name of the current source file
         public boolean audioOnly;      // output has no video track (.m4a)
+        public final ArrayList<Uri> outputs = new ArrayList<>(); // all successful outputs
 
         /** Progress across the whole batch, factoring in completed files. */
         public float batchFraction() {
@@ -92,10 +94,11 @@ public class ConversionService extends Service implements ConversionJob.Listener
     private volatile boolean batchCancelled;
     private long lastNotifMs = 0;
 
-    // Aggregated results across the batch.
+    // Aggregated results across the batch (worker-thread only).
     private Uri lastOutput;
     private String lastDisplayName;
     private String lastError;
+    private final ArrayList<Uri> collectedOutputs = new ArrayList<>();
 
     public class LocalBinder extends Binder {
         public ConversionService getService() {
@@ -214,6 +217,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
         snapshot.overall = 1f;
         lastOutput = output;
         lastDisplayName = displayName;
+        if (output != null) collectedOutputs.add(output); // worker thread only
         pushUpdate(true);
     }
 
@@ -263,13 +267,17 @@ public class ConversionService extends Service implements ConversionJob.Listener
         snapshot.overall = 1f;
         snapshot.message = summary;
         snapshot.output = lastOutput;
+        // Terminal, single write of the shared list before the final push; the UI
+        // copies it defensively on receipt.
+        snapshot.outputs.clear();
+        snapshot.outputs.addAll(collectedOutputs);
 
         pushUpdate(true);
         releaseWakeLock();
         stopForeground(STOP_FOREGROUND_REMOVE);
         if (finalStatus != Status.CANCELLED) {
             NotificationManager nm = getSystemService(NotificationManager.class);
-            if (nm != null) nm.notify(NOTIF_ID + 1, buildDoneNotification(summary, lastOutput));
+            if (nm != null) nm.notify(NOTIF_ID + 1, buildDoneNotification(summary, collectedOutputs));
         }
         stopSelf();
     }
@@ -404,22 +412,34 @@ public class ConversionService extends Service implements ConversionJob.Listener
         return b.build();
     }
 
-    private Notification buildDoneNotification(String text, Uri output) {
-        String mime = snapshot.audioOnly ? "audio/mp4" : "video/mp4";
-        Intent open = output != null
-                ? new Intent(Intent.ACTION_VIEW).setDataAndType(output, mime)
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    private Notification buildDoneNotification(String text, ArrayList<Uri> outputs) {
+        boolean audioOnly = snapshot.audioOnly;
+        Uri first = outputs.isEmpty() ? null : outputs.get(0);
+
+        Intent open = first != null
+                ? OutputActions.view(first, audioOnly)
                 : new Intent(this, MainActivity.class);
-        PendingIntent pi = PendingIntent.getActivity(this, 2, open,
+        PendingIntent contentPi = PendingIntent.getActivity(this, 2, open,
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
 
-        return new NotificationCompat.Builder(this, CHANNEL_ID)
+        NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_convert)
                 .setContentTitle("Neon Video Compressor")
                 .setContentText(text)
                 .setAutoCancel(true)
-                .setContentIntent(pi)
-                .build();
+                .setContentIntent(contentPi);
+
+        // Share action — a chooser launched via getActivity so it still works
+        // after this service has stopped.
+        if (!outputs.isEmpty()) {
+            Intent chooser = OutputActions.share(this, outputs, audioOnly,
+                    getString(R.string.share_via));
+            PendingIntent sharePi = PendingIntent.getActivity(this, 3, chooser,
+                    PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
+                            | PendingIntent.FLAG_CANCEL_CURRENT);
+            b.addAction(0, getString(R.string.share), sharePi);
+        }
+        return b.build();
     }
 
     private PendingIntent actionIntent(String action) {

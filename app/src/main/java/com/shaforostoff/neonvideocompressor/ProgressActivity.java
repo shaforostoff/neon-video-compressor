@@ -1,11 +1,15 @@
 package com.shaforostoff.neonvideocompressor;
 
+import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Debug;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.view.View;
 import android.widget.ProgressBar;
@@ -17,18 +21,41 @@ import androidx.appcompat.app.AppCompatActivity;
 import com.google.android.material.button.MaterialButton;
 import com.shaforostoff.neonvideocompressor.service.ConversionService;
 
+import java.util.ArrayList;
 import java.util.Locale;
 
 public class ProgressActivity extends AppCompatActivity {
 
     private TextView txtBatch, txtPhase, txtPercent, txtTime, txtSpeed, txtRam;
     private ProgressBar progressBar;
-    private MaterialButton btnPauseResume, btnCancel;
+    private MaterialButton btnPauseResume, btnCancel, btnOpen, btnShare;
+    private View rowResultActions;
+
+    // Cached results so Open/Share survive rotation at DONE (the service may have
+    // already stopped, so the recreated activity can't rely on a fresh snapshot).
+    private final ArrayList<Uri> resultOutputs = new ArrayList<>();
+    private boolean resultAudioOnly;
+
+    private static final String STATE_OUTPUTS = "result_outputs";
+    private static final String STATE_AUDIO_ONLY = "result_audio_only";
+    private static final String STATE_FINISHED = "finished_state";
 
     // getPss() walks /proc/self/smaps, so sample it at most once per second
     // rather than on every per-frame snapshot.
     private static final long RAM_SAMPLE_INTERVAL_MS = 1000L;
     private long lastRamSampleMs;
+
+    // While paused there are no progress snapshots, so re-sample RAM on a timer
+    // to show the drop as the encoder is torn down.
+    private final Handler ramHandler = new Handler(Looper.getMainLooper());
+    private final Runnable ramTick = new Runnable() {
+        @Override
+        public void run() {
+            if (!paused || finishedState) return;
+            sampleRamNow();
+            ramHandler.postDelayed(this, RAM_SAMPLE_INTERVAL_MS);
+        }
+    };
 
     private ConversionService service;
     private boolean bound;
@@ -64,6 +91,9 @@ public class ProgressActivity extends AppCompatActivity {
         progressBar = findViewById(R.id.progressBar);
         btnPauseResume = findViewById(R.id.btnPauseResume);
         btnCancel = findViewById(R.id.btnCancel);
+        rowResultActions = findViewById(R.id.rowResultActions);
+        btnOpen = findViewById(R.id.btnOpen);
+        btnShare = findViewById(R.id.btnShare);
 
         btnPauseResume.setOnClickListener(v -> {
             if (!bound) return;
@@ -77,6 +107,42 @@ public class ProgressActivity extends AppCompatActivity {
                 service.cancel();
             }
         });
+        btnOpen.setOnClickListener(v -> {
+            if (resultOutputs.isEmpty()) return;
+            try {
+                startActivity(OutputActions.view(resultOutputs.get(0), resultAudioOnly));
+            } catch (ActivityNotFoundException e) {
+                Toast.makeText(this, "No app to open this file", Toast.LENGTH_SHORT).show();
+            }
+        });
+        btnShare.setOnClickListener(v -> {
+            if (resultOutputs.isEmpty()) return;
+            // A chooser always resolves, so no ActivityNotFoundException guard needed.
+            startActivity(OutputActions.share(this, resultOutputs, resultAudioOnly,
+                    getString(R.string.share_via)));
+        });
+
+        // Restore cached results so Open/Share work after a rotation at DONE even
+        // if the service has already stopped and the rebind finds it gone.
+        if (savedInstanceState != null) {
+            ArrayList<Uri> saved = savedInstanceState.getParcelableArrayList(STATE_OUTPUTS);
+            if (saved != null) resultOutputs.addAll(saved);
+            resultAudioOnly = savedInstanceState.getBoolean(STATE_AUDIO_ONLY);
+            finishedState = savedInstanceState.getBoolean(STATE_FINISHED);
+            if (finishedState) {
+                btnPauseResume.setEnabled(false);
+                btnCancel.setText("Close");
+                rowResultActions.setVisibility(resultOutputs.isEmpty() ? View.GONE : View.VISIBLE);
+            }
+        }
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        out.putParcelableArrayList(STATE_OUTPUTS, resultOutputs);
+        out.putBoolean(STATE_AUDIO_ONLY, resultAudioOnly);
+        out.putBoolean(STATE_FINISHED, finishedState);
     }
 
     @Override
@@ -88,6 +154,7 @@ public class ProgressActivity extends AppCompatActivity {
     @Override
     protected void onStop() {
         super.onStop();
+        stopRamTicker();
         if (bound) {
             service.setUiCallback(null);
             unbindService(connection);
@@ -120,7 +187,13 @@ public class ProgressActivity extends AppCompatActivity {
                         : "Speed: —");
                 btnPauseResume.setText(paused ? R.string.resume : R.string.pause);
                 btnPauseResume.setEnabled(true);
-                updateRam();
+                rowResultActions.setVisibility(View.GONE);
+                if (paused) {
+                    startRamTicker();
+                } else {
+                    stopRamTicker();
+                    updateRam();
+                }
                 break;
             case DONE:
                 finishedState = true;
@@ -129,9 +202,16 @@ public class ProgressActivity extends AppCompatActivity {
                 txtTime.setText(s.message != null ? s.message : "");
                 String savedTo = s.audioOnly ? "Saved to Music" : "Saved to Movies";
                 txtSpeed.setText(savedTo);
+                stopRamTicker();
                 txtRam.setText("");
                 btnPauseResume.setEnabled(false);
                 btnCancel.setText("Close");
+                // Cache outputs (defensive copy off the shared Snapshot) and offer
+                // Open/Share — covers full and partial success.
+                resultOutputs.clear();
+                resultOutputs.addAll(s.outputs);
+                resultAudioOnly = s.audioOnly;
+                rowResultActions.setVisibility(resultOutputs.isEmpty() ? View.GONE : View.VISIBLE);
                 Toast.makeText(this, s.message != null ? s.message : savedTo,
                         Toast.LENGTH_LONG).show();
                 break;
@@ -141,32 +221,50 @@ public class ProgressActivity extends AppCompatActivity {
                 txtPhase.setText("Error");
                 txtTime.setText(s.message != null ? s.message : "Unknown error");
                 txtSpeed.setText("");
+                stopRamTicker();
                 txtRam.setText("");
                 btnPauseResume.setEnabled(false);
                 btnCancel.setText("Close");
+                rowResultActions.setVisibility(View.GONE);
                 break;
             case CANCELLED:
                 finishedState = true;
                 txtBatch.setVisibility(View.GONE);
                 txtPhase.setText("Cancelled");
                 txtTime.setText(s.message != null ? s.message : "");
+                stopRamTicker();
                 txtRam.setText("");
                 btnPauseResume.setEnabled(false);
                 btnCancel.setText("Close");
+                rowResultActions.setVisibility(View.GONE);
                 break;
             default:
                 break;
         }
     }
 
-    // Total process PSS (Java heap + native x265/FFmpeg allocations + mapped code),
-    // which is the memory the OS actually attributes to the app.
+    // Throttled sample for the running state (called per progress snapshot).
     private void updateRam() {
         long now = SystemClock.uptimeMillis();
         if (lastRamSampleMs != 0 && now - lastRamSampleMs < RAM_SAMPLE_INTERVAL_MS) return;
-        lastRamSampleMs = now;
+        sampleRamNow();
+    }
+
+    // Total process PSS (Java heap + native x265/FFmpeg allocations + mapped code),
+    // which is the memory the OS actually attributes to the app.
+    private void sampleRamNow() {
+        lastRamSampleMs = SystemClock.uptimeMillis();
         long pssKb = Debug.getPss(); // total PSS of this process, in KB
         txtRam.setText(String.format(Locale.US, "RAM: %d MB", (pssKb + 512) / 1024));
+    }
+
+    private void startRamTicker() {
+        ramHandler.removeCallbacks(ramTick);
+        ramHandler.post(ramTick);
+    }
+
+    private void stopRamTicker() {
+        ramHandler.removeCallbacks(ramTick);
     }
 
     private String phaseLabel(ConversionService.Snapshot s) {

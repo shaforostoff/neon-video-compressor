@@ -18,6 +18,10 @@
     <string name="label_encoded">ENCODED</string>
     <string name="label_original">ORIGINAL</string>
 
+    <string name="open">Open</string>
+    <string name="share">Share</string>
+    <string name="share_via">Share via…</string>
+
     <string name="pause">Pause</string>
     <string name="resume">Resume</string>
     <string name="cancel">Cancel</string>

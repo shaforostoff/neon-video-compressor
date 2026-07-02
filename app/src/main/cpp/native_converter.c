@@ -285,11 +285,25 @@ static void copy_display_matrix(AVStream *in, AVStream *out) {
 }
 
 static int drain_encoder(AVCodecContext *enc, AVFormatContext *ofmt,
-                         AVStream *ost, AVPacket *opkt) {
+                         AVStream *ost, AVPacket *opkt, int64_t *lastDts) {
     int ret;
     while ((ret = avcodec_receive_packet(enc, opkt)) >= 0) {
         opkt->stream_index = ost->index;
         av_packet_rescale_ts(opkt, enc->time_base, ost->time_base);
+        // Monotonic-DTS guard. Normally a no-op, but after a pause the encoder is
+        // torn down and rebuilt to release RAM; the fresh encoder restarts its DTS
+        // relative to the (continuing) input PTS, which can dip below the last DTS
+        // we wrote by the B-frame reorder depth. Bump such packets so the muxer
+        // keeps a strictly increasing DTS, holding PTS >= DTS.
+        if (opkt->dts != AV_NOPTS_VALUE) {
+            if (*lastDts != AV_NOPTS_VALUE && opkt->dts <= *lastDts) {
+                opkt->dts = *lastDts + 1;
+                if (opkt->pts != AV_NOPTS_VALUE && opkt->pts < opkt->dts) {
+                    opkt->pts = opkt->dts;
+                }
+            }
+            *lastDts = opkt->dts;
+        }
         ret = av_interleaved_write_frame(ofmt, opkt); // takes ownership / unrefs
         if (ret < 0) return ret;
     }
@@ -306,7 +320,8 @@ static int pump_decoder(JNIEnv *env, AVCodecContext *dec, AVCodecContext *enc,
                         AVFormatContext *ofmt, AVStream *ost, AVStream *ist,
                         AVFrame *frame, AVPacket *opkt,
                         struct SwsContext **sws, AVFrame **swsFrame,
-                        int64_t *lastPts, int64_t maxUs, jobject cb, jmethodID onProg) {
+                        int64_t *lastPts, int64_t *lastDts, int64_t maxUs,
+                        jobject cb, jmethodID onProg) {
     int ret;
     while ((ret = avcodec_receive_frame(dec, frame)) >= 0) {
         // Re-label deprecated full-range YUVJ formats as their plain equivalents.
@@ -367,11 +382,65 @@ static int pump_decoder(JNIEnv *env, AVCodecContext *dec, AVCodecContext *enc,
         ret = avcodec_send_frame(enc, encIn);
         av_frame_unref(frame);
         if (ret < 0) return ret;
-        ret = drain_encoder(enc, ofmt, ost, opkt);
+        ret = drain_encoder(enc, ofmt, ost, opkt, lastDts);
         if (ret < 0) return ret;
     }
     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) return 0;
     return ret;
+}
+
+// Allocates and opens a fresh libx265 encoder configured to match the decoded
+// source. Used for the initial encode and to rebuild the encoder after a
+// pause-time tear-down — because the settings are identical, its VPS/SPS/PPS
+// match the muxer's existing sample entry, and its first output frame is a fresh
+// IDR that cleanly splices onto the already-written stream. Returns NULL on
+// failure.
+static AVCodecContext *open_hevc_encoder(const AVCodec *encoder, AVCodecContext *dec,
+                                         AVFormatContext *ifmt, AVStream *ist,
+                                         const char *preset, int crf) {
+    AVCodecContext *enc = avcodec_alloc_context3(encoder);
+    if (!enc) return NULL;
+    enc->width = dec->width;
+    enc->height = dec->height;
+    enc->pix_fmt = AV_PIX_FMT_YUV420P;
+    enc->sample_aspect_ratio = dec->sample_aspect_ratio;
+    enc->color_range = dec->color_range;
+    enc->color_primaries = dec->color_primaries;
+    enc->color_trc = dec->color_trc;
+    enc->colorspace = dec->colorspace;
+
+    // Many H.264 phone recordings decode to the deprecated full-range YUVJ420P
+    // (== YUV420P + JPEG range). Encoding to YUV420P would make swscale squeeze
+    // the data into limited range while the copied metadata still says full
+    // range → washed-out colours. Signal full range explicitly and let
+    // pump_decoder re-label the frames as YUV420P so no range-shifting scale runs.
+    int fullRange = dec->color_range == AVCOL_RANGE_JPEG
+                    || dec->pix_fmt == AV_PIX_FMT_YUVJ420P
+                    || dec->pix_fmt == AV_PIX_FMT_YUVJ422P
+                    || dec->pix_fmt == AV_PIX_FMT_YUVJ444P;
+    if (fullRange) enc->color_range = AVCOL_RANGE_JPEG;
+
+    AVRational fr = av_guess_frame_rate(ifmt, ist, NULL);
+    if (fr.num <= 0 || fr.den <= 0) fr = (AVRational) {30, 1};
+    enc->framerate = fr;
+    // Use the input's (fine-grained) time base so source timestamps pass through
+    // unchanged — avoids collapsing distinct VFR timestamps onto the same tick.
+    enc->time_base = ist->time_base;
+
+    av_opt_set(enc->priv_data, "preset", preset, 0);
+    char crfStr[16];
+    snprintf(crfStr, sizeof(crfStr), "%d", crf);
+    av_opt_set(enc->priv_data, "crf", crfStr, 0);
+
+    enc->codec_tag = MKTAG('h', 'v', 'c', '1');
+    enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    if (avcodec_open2(enc, encoder, NULL) < 0) {
+        avcodec_free_context(&enc);
+        return NULL;
+    }
+    LOGI("x265 encoder opened: %dx%d crf=%d preset=%s range=%d", enc->width,
+         enc->height, crf, preset, enc->color_range);
+    return enc;
 }
 
 // ---------------------------------------------------------------------------
@@ -421,45 +490,8 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscode
 
     const AVCodec *encoder = avcodec_find_encoder_by_name("libx265");
     if (!encoder) { LOGE("libx265 not found"); goto end; }
-    enc = avcodec_alloc_context3(encoder);
-    if (!enc) goto end;
-    enc->width = dec->width;
-    enc->height = dec->height;
-    enc->pix_fmt = AV_PIX_FMT_YUV420P;
-    enc->sample_aspect_ratio = dec->sample_aspect_ratio;
-    enc->color_range = dec->color_range;
-    enc->color_primaries = dec->color_primaries;
-    enc->color_trc = dec->color_trc;
-    enc->colorspace = dec->colorspace;
-
-    // Many H.264 phone recordings decode to the deprecated full-range YUVJ420P
-    // (== YUV420P + JPEG range). Encoding to YUV420P would make swscale squeeze
-    // the data into limited range while the copied metadata still says full
-    // range → washed-out colours. Signal full range explicitly and let
-    // pump_decoder re-label the frames as YUV420P so no range-shifting scale runs.
-    int fullRange = dec->color_range == AVCOL_RANGE_JPEG
-                    || dec->pix_fmt == AV_PIX_FMT_YUVJ420P
-                    || dec->pix_fmt == AV_PIX_FMT_YUVJ422P
-                    || dec->pix_fmt == AV_PIX_FMT_YUVJ444P;
-    if (fullRange) enc->color_range = AVCOL_RANGE_JPEG;
-    LOGI("transcode: color_range=%d(full=%d) primaries=%d trc=%d space=%d",
-         dec->color_range, fullRange, dec->color_primaries, dec->color_trc, dec->colorspace);
-
-    AVRational fr = av_guess_frame_rate(ifmt, ist, NULL);
-    if (fr.num <= 0 || fr.den <= 0) fr = (AVRational) {30, 1};
-    enc->framerate = fr;
-    // Use the input's (fine-grained) time base so source timestamps pass through
-    // unchanged — avoids collapsing distinct VFR timestamps onto the same tick.
-    enc->time_base = ist->time_base;
-
-    av_opt_set(enc->priv_data, "preset", preset, 0);
-    char crfStr[16];
-    snprintf(crfStr, sizeof(crfStr), "%d", (int) crf);
-    av_opt_set(enc->priv_data, "crf", crfStr, 0);
-
-    enc->codec_tag = MKTAG('h', 'v', 'c', '1');
-    enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-    if (avcodec_open2(enc, encoder, NULL) < 0) { LOGE("x265 open failed"); goto end; }
+    enc = open_hevc_encoder(encoder, dec, ifmt, ist, preset, (int) crf);
+    if (!enc) { LOGE("x265 open failed"); goto end; }
 
     if (avformat_alloc_output_context2(&ofmt, NULL, NULL, outPath) < 0 || !ofmt) goto end;
     AVStream *ost = avformat_new_stream(ofmt, NULL);
@@ -483,9 +515,44 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscode
     if (!frame || !pkt || !opkt) goto end;
 
     int64_t lastPts = INT64_MIN;
+    int64_t lastDtsOut = AV_NOPTS_VALUE;
 
     while (1) {
-        if (check_control(ctrl)) { ret = RET_CANCELLED; goto end; }
+        // Pause handling. Rather than block with the encoder alive — which would
+        // pin x265's lookahead, reference frames, frame-thread buffers and thread
+        // pool (hundreds of MB) for the whole paused duration — we flush and free
+        // the encoder so that memory is released while idle. The decoder and muxer
+        // stay open, so we keep our exact stream position; on resume we rebuild the
+        // encoder, whose first frame is a fresh IDR that splices onto the stream.
+        if (ctrl) {
+            pthread_mutex_lock(&ctrl->mutex);
+            int wantPause = ctrl->paused && !ctrl->cancel;
+            pthread_mutex_unlock(&ctrl->mutex);
+            if (wantPause) {
+                avcodec_send_frame(enc, NULL);
+                if (drain_encoder(enc, ofmt, ost, opkt, &lastDtsOut) < 0) {
+                    LOGE("drain before pause failed"); ret = RET_ERROR; goto end;
+                }
+                avcodec_free_context(&enc);
+                if (sws) { sws_freeContext(sws); sws = NULL; }
+                if (swsFrame) av_frame_free(&swsFrame);
+                LOGI("paused: encoder torn down, RAM released");
+
+                pthread_mutex_lock(&ctrl->mutex);
+                while (ctrl->paused && !ctrl->cancel) {
+                    pthread_cond_wait(&ctrl->cond, &ctrl->mutex);
+                }
+                int cancelled = ctrl->cancel;
+                pthread_mutex_unlock(&ctrl->mutex);
+                if (cancelled) { ret = RET_CANCELLED; goto end; }
+
+                enc = open_hevc_encoder(encoder, dec, ifmt, ist, preset, (int) crf);
+                if (!enc) { LOGE("re-open x265 after pause failed"); ret = RET_ERROR; goto end; }
+                LOGI("resumed: encoder rebuilt");
+            }
+            if (ctrl->cancel) { ret = RET_CANCELLED; goto end; }
+        }
+
         int r = av_read_frame(ifmt, pkt);
         if (r < 0) break; // EOF or interrupted
         if (pkt->stream_index == vstream) {
@@ -493,7 +560,7 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscode
             av_packet_unref(pkt);
             if (r < 0) { LOGE("send_packet failed: %s", av_err2str(r)); ret = RET_ERROR; goto end; }
             r = pump_decoder(env, dec, enc, ofmt, ost, ist, frame, opkt,
-                             &sws, &swsFrame, &lastPts, maxDurationUs, cb, onProg);
+                             &sws, &swsFrame, &lastPts, &lastDtsOut, maxDurationUs, cb, onProg);
             if (r < 0) { LOGE("pump_decoder failed: %s", av_err2str(r)); ret = RET_ERROR; goto end; }
             if (r == 1) break; // reached the requested preview window
         } else {
@@ -505,9 +572,9 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscode
 
     // Flush decoder, then encoder.
     avcodec_send_packet(dec, NULL);
-    pump_decoder(env, dec, enc, ofmt, ost, ist, frame, opkt, &sws, &swsFrame, &lastPts, maxDurationUs, cb, onProg);
+    pump_decoder(env, dec, enc, ofmt, ost, ist, frame, opkt, &sws, &swsFrame, &lastPts, &lastDtsOut, maxDurationUs, cb, onProg);
     avcodec_send_frame(enc, NULL);
-    drain_encoder(enc, ofmt, ost, opkt);
+    drain_encoder(enc, ofmt, ost, opkt, &lastDtsOut);
 
     if (av_write_trailer(ofmt) < 0) goto end;
     ret = RET_OK;
