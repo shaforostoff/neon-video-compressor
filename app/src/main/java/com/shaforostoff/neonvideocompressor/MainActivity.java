@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -158,6 +159,37 @@ public class MainActivity extends AppCompatActivity {
                 renderSelection();
             }
         }
+
+        // Videos "sent"/"shared" to us from another app (e.g. the Photos share sheet).
+        handleShareIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        // singleTop: a share that arrives while we're already running is delivered
+        // here instead of onCreate.
+        setIntent(intent);
+        handleShareIntent(intent);
+    }
+
+    /**
+     * If we were launched via the system share sheet ({@code ACTION_SEND} /
+     * {@code ACTION_SEND_MULTIPLE}), adopt the shared video(s) as the current
+     * selection so the user can go straight to converting.
+     */
+    private void handleShareIntent(Intent intent) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        List<Uri> shared = null;
+        if (Intent.ACTION_SEND.equals(action)) {
+            Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (uri != null) shared = Collections.singletonList(uri);
+        } else if (Intent.ACTION_SEND_MULTIPLE.equals(action)) {
+            ArrayList<Uri> uris = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (uris != null && !uris.isEmpty()) shared = uris;
+        }
+        if (shared != null) onVideosPicked(shared);
     }
 
     @Override
