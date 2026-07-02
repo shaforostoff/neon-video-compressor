@@ -1,7 +1,8 @@
 <resources>
     <string name="app_name">Neon Video Compressor</string>
 
-    <string name="select_video">Seleziona video</string>
+    <string name="select_videos">Seleziona video</string>
+    <string name="select_files">Seleziona file</string>
     <string name="videos_selected">%1$d video selezionati</string>
     <string name="no_file_selected">Nessun file selezionato</string>
     <string name="video_settings">Video</string>

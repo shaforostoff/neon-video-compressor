@@ -1,11 +1,9 @@
 package com.shaforostoff.neonvideocompressor.engine;
 
 import android.content.Context;
-import android.database.Cursor;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
-import android.provider.OpenableColumns;
 
 import com.shaforostoff.neonvideocompressor.R;
 
@@ -56,6 +54,12 @@ public class ConversionJob {
     private long lastUpdateMs = 0;
     private long lastProcessedUs = 0;
     private double speed = 0;
+
+    // Cumulative active (pause-excluded) video-encode time, for an accurate
+    // average realtime ratio once the job finishes — unlike the smoothed
+    // instantaneous `speed` above, this isn't reset between progress ticks.
+    private long encodeActiveWallMs;
+    private long encodeActiveMediaUs;
 
     // Temp output files, used both to build the final result and to read a live
     // "bytes written so far" size for progress display.
@@ -224,6 +228,16 @@ public class ConversionJob {
 
     // -------------------------------------------------------------------------
 
+    /** Total source media (microseconds) actually encoded during active (non-paused) time. */
+    public long getEncodeActiveMediaUs() {
+        return encodeActiveMediaUs;
+    }
+
+    /** Total wall-clock time (ms) spent actively video-encoding, pauses excluded. */
+    public long getEncodeActiveWallMs() {
+        return encodeActiveWallMs;
+    }
+
     private void computeWeights(boolean video, boolean audio) {
         if (video && audio) {
             wVideo = 0.88f;
@@ -277,6 +291,10 @@ public class ConversionJob {
             if (dWall > 0 && dWall < 2000 && dUs >= 0) {
                 double inst = (dUs / 1000.0) / dWall; // mediaMs / wallMs == realtime ratio
                 speed = speed <= 0 ? inst : speed * 0.8 + inst * 0.2;
+                if (phase == Phase.VIDEO) {
+                    encodeActiveWallMs += dWall;
+                    encodeActiveMediaUs += dUs;
+                }
             }
         }
         lastUpdateMs = nowMs;
@@ -322,24 +340,11 @@ public class ConversionJob {
     }
 
     private String buildOutputName(boolean audioOnly) {
-        String base = queryDisplayName();
+        String base = SourceMetadata.queryDisplayName(context, inputUri);
         if (base == null) base = "video_" + System.currentTimeMillis();
         int dot = base.lastIndexOf('.');
         if (dot > 0) base = base.substring(0, dot);
         return audioOnly ? base + "_audio.m4a" : base + "_hevc.mp4";
-    }
-
-    private String queryDisplayName() {
-        try (Cursor c = context.getContentResolver().query(
-                inputUri, new String[]{OpenableColumns.DISPLAY_NAME},
-                null, null, null)) {
-            if (c != null && c.moveToFirst()) {
-                int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-                if (idx >= 0) return c.getString(idx);
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
     }
 
     private static void deleteQuietly(File... files) {

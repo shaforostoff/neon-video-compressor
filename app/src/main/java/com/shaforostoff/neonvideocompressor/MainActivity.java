@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.PickVisualMediaRequest;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
@@ -30,6 +31,7 @@ import androidx.core.content.ContextCompat;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.shaforostoff.neonvideocompressor.engine.Options;
+import com.shaforostoff.neonvideocompressor.engine.SourceMetadata;
 import com.shaforostoff.neonvideocompressor.service.ConversionService;
 
 import java.util.Locale;
@@ -57,14 +59,35 @@ public class MainActivity extends AppCompatActivity {
 
     private int[] bitrateValues;
 
-    private final ActivityResultLauncher<String[]> picker =
+    // Folder/document browser (any provider, any folder) — reliable for videos
+    // tucked away outside the media gallery, but many providers don't actually
+    // filter their file listing by the requested mime type, so JPGs etc. can
+    // still show up alongside videos in a mixed folder.
+    private final ActivityResultLauncher<String[]> filesPicker =
             registerForActivityResult(new ActivityResultContracts.OpenMultipleDocuments(), uris -> {
+                if (uris != null && !uris.isEmpty()) onVideosPicked(uris);
+            });
+
+    // System Photo Picker, restricted to videos — properly filtered (no photos
+    // ever shown), but limited to gallery-indexed media (can't browse arbitrary
+    // folders or cloud-storage apps).
+    private final ActivityResultLauncher<PickVisualMediaRequest> videosPicker =
+            registerForActivityResult(new ActivityResultContracts.PickMultipleVisualMedia(), uris -> {
                 if (uris != null && !uris.isEmpty()) onVideosPicked(uris);
             });
 
     private final ActivityResultLauncher<String> notifPermission =
             registerForActivityResult(new ActivityResultContracts.RequestPermission(),
                     granted -> startConversion());
+
+    // Not required for the Photo Picker itself (it grants per-item read access
+    // on its own); only requested so SourceMetadata can recover the real
+    // filename when an OEM's MediaProvider fails to resolve a picker Uri.
+    // Launch proceeds either way, so declining just means a possible numeric
+    // filename on affected devices rather than a blocked picker.
+    private final ActivityResultLauncher<String> videoLibraryPermission =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(),
+                    granted -> launchVideoPicker());
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -119,8 +142,9 @@ public class MainActivity extends AppCompatActivity {
         seekCrf.setProgress(prefs.getInt(KEY_CRF, seekCrf.getProgress()));
         txtCrf.setText(String.format(Locale.US, getString(R.string.crf_label), seekCrf.getProgress()));
 
-        ((MaterialButton) findViewById(R.id.btnSelect)).setOnClickListener(v ->
-                picker.launch(new String[]{"video/*"}));
+        ((MaterialButton) findViewById(R.id.btnSelectVideos)).setOnClickListener(v -> onSelectVideosClicked());
+        ((MaterialButton) findViewById(R.id.btnSelectFiles)).setOnClickListener(v ->
+                filesPicker.launch(new String[]{"video/*"}));
         btnPreview.setOnClickListener(v -> onPreviewClicked());
         btnConvert.setOnClickListener(v -> onConvertClicked());
         ((MaterialButton) findViewById(R.id.btnAbout)).setOnClickListener(v -> showAboutDialog());
@@ -241,15 +265,23 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private String queryName(Uri uri) {
-        try (android.database.Cursor c = getContentResolver().query(
-                uri, null, null, null, null)) {
-            if (c != null && c.moveToFirst()) {
-                int idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
-                if (idx >= 0) return c.getString(idx);
-            }
-        } catch (Exception ignored) {
+        return SourceMetadata.queryDisplayName(this, uri);
+    }
+
+    private void onSelectVideosClicked() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO)
+                != PackageManager.PERMISSION_GRANTED) {
+            videoLibraryPermission.launch(Manifest.permission.READ_MEDIA_VIDEO);
+        } else {
+            launchVideoPicker();
         }
-        return null;
+    }
+
+    private void launchVideoPicker() {
+        videosPicker.launch(new PickVisualMediaRequest.Builder()
+                .setMediaType(ActivityResultContracts.PickVisualMedia.VideoOnly.INSTANCE)
+                .build());
     }
 
     private void onConvertClicked() {

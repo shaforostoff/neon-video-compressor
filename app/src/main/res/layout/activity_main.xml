@@ -10,12 +10,29 @@
         android:orientation="vertical"
         android:padding="20dp">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnSelect"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="32dp"
-            android:text="@string/select_video" />
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnSelectVideos"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:text="@string/select_videos" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnSelectFiles"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="@string/select_files" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/txtFile"

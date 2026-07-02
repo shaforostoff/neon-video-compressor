@@ -8,8 +8,6 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
-import android.content.res.AssetFileDescriptor;
-import android.database.Cursor;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
@@ -18,7 +16,6 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
-import android.provider.OpenableColumns;
 import android.text.format.Formatter;
 
 import androidx.core.app.NotificationCompat;
@@ -30,6 +27,7 @@ import com.shaforostoff.neonvideocompressor.R;
 import com.shaforostoff.neonvideocompressor.engine.ConversionJob;
 import com.shaforostoff.neonvideocompressor.engine.JobControl;
 import com.shaforostoff.neonvideocompressor.engine.Options;
+import com.shaforostoff.neonvideocompressor.engine.SourceMetadata;
 
 import java.util.ArrayList;
 
@@ -105,6 +103,8 @@ public class ConversionService extends Service implements ConversionJob.Listener
     private long totalBytes;        // size of produced outputs
     private long originalBytes;     // size of the sources that succeeded
     private long currentInputBytes; // size of the source currently being processed
+    private long totalEncodeMediaUs; // source media encoded, across the batch (active time only)
+    private long totalEncodeWallMs;  // wall-clock ms spent actively video-encoding, across the batch
     private final ArrayList<Uri> collectedOutputs = new ArrayList<>();
 
     public class LocalBinder extends Binder {
@@ -190,6 +190,8 @@ public class ConversionService extends Service implements ConversionJob.Listener
             ConversionJob job = new ConversionJob(this, input, currentInputBytes, options, c, this);
             try {
                 job.run();
+                totalEncodeMediaUs += job.getEncodeActiveMediaUs();
+                totalEncodeWallMs += job.getEncodeActiveWallMs();
             } catch (Throwable t) {
                 snapshot.failed++;
                 lastError = t.getMessage() != null ? t.getMessage() : t.toString();
@@ -258,22 +260,38 @@ public class ConversionService extends Service implements ConversionJob.Listener
         int ok = snapshot.succeeded;
         int bad = snapshot.failed;
 
-        // Size change across the successful file(s), e.g. " · 500 MB -> 145 MB".
-        String size = totalBytes > 0
-                ? " · " + Formatter.formatShortFileSize(this, originalBytes)
+        // Size change across the successful file(s), e.g. "500 MB -> 145 MB".
+        String sizeText = totalBytes > 0
+                ? Formatter.formatShortFileSize(this, originalBytes)
                         + " -> " + Formatter.formatShortFileSize(this, totalBytes)
-                : "";
+                : null;
+        // Average x265 encode speed as a realtime ratio, e.g. "Avg speed: 1.85× realtime".
+        // Only meaningful when video was actually re-encoded (not Copy/Remove).
+        String avgSpeedText = totalEncodeWallMs > 0
+                ? getString(R.string.avg_speed_format, (totalEncodeMediaUs / 1000.0) / totalEncodeWallMs)
+                : null;
+        // Stats go on their own line below the headline, e.g.:
+        //   Saved clip_hevc.mp4
+        //   500 MB -> 145 MB · Avg speed: 1.85× realtime
+        String extra = "";
+        if (sizeText != null || avgSpeedText != null) {
+            StringBuilder sb = new StringBuilder("\n");
+            if (sizeText != null) sb.append(sizeText);
+            if (sizeText != null && avgSpeedText != null) sb.append(" · ");
+            if (avgSpeedText != null) sb.append(avgSpeedText);
+            extra = sb.toString();
+        }
 
         Status finalStatus;
         String summary;
         if (batchCancelled) {
             finalStatus = Status.CANCELLED;
-            summary = getString(R.string.summary_cancelled, ok, total) + size;
+            summary = getString(R.string.summary_cancelled, ok, total) + extra;
         } else if (bad == 0) {
             finalStatus = Status.DONE;
             summary = (total == 1
                     ? getString(R.string.summary_saved_one, lastDisplayName)
-                    : getString(R.string.summary_converted_n, ok)) + size;
+                    : getString(R.string.summary_converted_n, ok)) + extra;
         } else if (ok == 0) {
             finalStatus = Status.ERROR;
             summary = total == 1
@@ -285,7 +303,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
                             : getString(R.string.summary_all_failed, bad));
         } else {
             finalStatus = Status.DONE; // partial success
-            summary = getString(R.string.summary_partial, ok, total, bad) + size;
+            summary = getString(R.string.summary_partial, ok, total, bad) + extra;
         }
 
         snapshot.status = finalStatus;
@@ -452,6 +470,10 @@ public class ConversionService extends Service implements ConversionJob.Listener
                 .setSmallIcon(R.drawable.ic_stat_convert)
                 .setContentTitle(getString(R.string.app_name))
                 .setContentText(text)
+                // The summary can span multiple lines (headline + size/speed stats);
+                // BigTextStyle keeps that intact when the notification is expanded,
+                // instead of squashing it onto the collapsed single line.
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(text))
                 .setAutoCancel(true)
                 .setContentIntent(contentPi);
 
@@ -485,34 +507,12 @@ public class ConversionService extends Service implements ConversionJob.Listener
     }
 
     private long queryUriSize(Uri uri) {
-        try (Cursor c = getContentResolver().query(
-                uri, new String[]{OpenableColumns.SIZE}, null, null, null)) {
-            if (c != null && c.moveToFirst()) {
-                int idx = c.getColumnIndex(OpenableColumns.SIZE);
-                if (idx >= 0 && !c.isNull(idx)) return c.getLong(idx);
-            }
-        } catch (Exception ignored) {
-        }
-        try (AssetFileDescriptor afd = getContentResolver().openAssetFileDescriptor(uri, "r")) {
-            if (afd != null) {
-                long len = afd.getLength();
-                if (len >= 0) return len;
-            }
-        } catch (Exception ignored) {
-        }
-        return 0;
+        return SourceMetadata.querySize(this, uri);
     }
 
     private String queryName(Uri uri) {
-        try (Cursor c = getContentResolver().query(
-                uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
-            if (c != null && c.moveToFirst()) {
-                int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-                if (idx >= 0) return c.getString(idx);
-            }
-        } catch (Exception ignored) {
-        }
-        return uri.getLastPathSegment();
+        String name = SourceMetadata.queryDisplayName(this, uri);
+        return name != null ? name : uri.getLastPathSegment();
     }
 
     private String phaseLabel(ConversionJob.Phase phase) {
