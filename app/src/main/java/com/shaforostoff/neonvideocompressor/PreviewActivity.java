@@ -67,8 +67,13 @@ public class PreviewActivity extends AppCompatActivity {
     private static final int WRAP_MARGIN_MS = 120; // wrap this far before the true end
     private int loopEndMs;
 
-    // Source geometry, from the native probe.
+    // Source geometry, from the native probe (coded dimensions, pre-rotation).
     private int vidW, vidH, rotationDeg;
+    // Video size as MediaPlayer reports it. On most devices the SurfaceTexture
+    // transform already carries the container rotation, so this comes back
+    // swapped (portrait) for a 90/270 source and the frame is already upright;
+    // see applyTransform.
+    private int reportedW, reportedH;
 
     // Pinch/double-tap zoom + pan, applied identically to both textures (on top
     // of the fit/rotate transform) so a hold-to-compare swap while zoomed in
@@ -304,7 +309,13 @@ public class PreviewActivity extends AppCompatActivity {
             mp.setDataSource(file.getAbsolutePath());
             mp.setLooping(false); // looping is driven manually so both wrap together
             mp.setVolume(0f, 0f); // preview compares picture, not sound
-            mp.setOnVideoSizeChangedListener((m, w, h) -> applyTransform(tv));
+            mp.setOnVideoSizeChangedListener((m, w, h) -> {
+                if (w > 0 && h > 0) {
+                    reportedW = w;
+                    reportedH = h;
+                }
+                applyTransform(tv);
+            });
             mp.setOnErrorListener((m, what, extra) -> {
                 fail();
                 return true;
@@ -380,12 +391,18 @@ public class PreviewActivity extends AppCompatActivity {
     };
 
     /**
-     * Fits the video into the TextureView with letterboxing, applying the
-     * source rotation (TextureView doesn't honour rotation metadata itself),
-     * then layers the user's pinch/pan/double-tap zoom on top in view-pixel
-     * space. Both clips share the source's dimensions, so the same transform
-     * applies to both — that's what keeps the A/B comparison aligned while
-     * zoomed in.
+     * Fits the video into the TextureView with letterboxing, then layers the
+     * user's pinch/pan/double-tap zoom on top in view-pixel space. Both clips
+     * share the source's dimensions, so the same transform applies to both —
+     * that's what keeps the A/B comparison aligned while zoomed in.
+     *
+     * <p>Rotation is the subtle part. On most devices the SurfaceTexture
+     * transform already carries the source's rotation, so the frame arrives in
+     * the TextureView already upright — rotating it again here would
+     * double-rotate it (the classic "sideways and stretched" preview). We detect
+     * that case from the size MediaPlayer reports (already swapped to portrait
+     * for a 90/270 source) and then only need to letterbox. Only when the player
+     * did <em>not</em> pre-rotate do we apply the rotation ourselves.
      */
     private void applyTransform(TextureView tv) {
         if (vidW <= 0 || vidH <= 0) return;
@@ -393,20 +410,33 @@ public class PreviewActivity extends AppCompatActivity {
         if (vw == 0 || vh == 0) return;
 
         boolean swap = (rotationDeg == 90 || rotationDeg == 270);
-        float dispW = swap ? vidH : vidW;
+        float dispW = swap ? vidH : vidW; // true (post-rotation) display size
         float dispH = swap ? vidW : vidH;
+
+        // Did the player already rotate the frame? For a 90/270 source that shows
+        // up as MediaPlayer reporting a size whose orientation matches the display
+        // orientation rather than the (opposite) coded orientation.
+        boolean playerRotated = swap && reportedW > 0 && reportedH > 0
+                && (reportedW < reportedH) == (dispW < dispH);
+
         float scale = Math.min(vw / dispW, vh / dispH);
         float fw = dispW * scale; // on-screen video width
         float fh = dispH * scale; // on-screen video height
 
         float cx = vw / 2f, cy = vh / 2f;
         Matrix m = new Matrix();
-        // TextureView stretches the raw (unrotated) frame to fill vw×vh; scale it
-        // down so that, once rotated, it occupies exactly fw×fh, then rotate.
-        float sx = (swap ? fh : fw) / vw;
-        float sy = (swap ? fw : fh) / vh;
-        m.postScale(sx, sy, cx, cy);
-        m.postRotate(rotationDeg, cx, cy);
+        if (playerRotated) {
+            // Frame is already upright (dispW×dispH) but stretched to fill vw×vh;
+            // just squeeze it back to the letterboxed fw×fh — no rotation.
+            m.postScale(fw / vw, fh / vh, cx, cy);
+        } else {
+            // TextureView stretches the raw (unrotated) frame to fill vw×vh; scale
+            // it so that, once rotated, it occupies exactly fw×fh, then rotate.
+            float sx = (swap ? fh : fw) / vw;
+            float sy = (swap ? fw : fh) / vh;
+            m.postScale(sx, sy, cx, cy);
+            m.postRotate(rotationDeg, cx, cy);
+        }
         m.postScale(zoomScale, zoomScale, cx, cy);
         m.postTranslate(panX, panY);
         tv.setTransform(m);
