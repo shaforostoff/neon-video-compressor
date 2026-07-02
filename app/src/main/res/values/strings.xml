@@ -13,7 +13,7 @@
     <string name="preview">Preview (first 5s)</string>
     <string name="preview_needs_encode">Preview is only available when encoding video</string>
     <string name="preview_encoding">Encoding preview…</string>
-    <string name="preview_hint">Hold to compare with the original</string>
+    <string name="preview_hint">Hold to compare · Pinch or double-tap to zoom</string>
     <string name="preview_failed">Couldn\'t build preview</string>
     <string name="label_encoded">ENCODED</string>
     <string name="label_original">ORIGINAL</string>

@@ -10,7 +10,9 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.view.GestureDetector;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
@@ -68,6 +70,19 @@ public class PreviewActivity extends AppCompatActivity {
     // Source geometry, from the native probe.
     private int vidW, vidH, rotationDeg;
 
+    // Pinch/double-tap zoom + pan, applied identically to both textures (on top
+    // of the fit/rotate transform) so a hold-to-compare swap while zoomed in
+    // still shows the same framing on both sides.
+    private static final float MIN_ZOOM = 1f;
+    private static final float MAX_ZOOM = 5f;
+    private static final float DOUBLE_TAP_ZOOM = 3f;
+    private float zoomScale = 1f;
+    private float panX, panY;
+    private ScaleGestureDetector scaleDetector;
+    private GestureDetector gestureDetector;
+    private int panPointerId = MotionEvent.INVALID_POINTER_ID;
+    private float lastPanX, lastPanY;
+
     private boolean clipsReady;
     private volatile boolean destroyed;
 
@@ -114,15 +129,76 @@ public class PreviewActivity extends AppCompatActivity {
         texOriginal.setSurfaceTextureListener(new SurfaceCb(false));
         texOriginal.setAlpha(0f);
 
+        scaleDetector = new ScaleGestureDetector(this,
+                new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                    @Override
+                    public boolean onScale(ScaleGestureDetector d) {
+                        applyZoomFactor(d.getScaleFactor(), d.getFocusX(), d.getFocusY());
+                        return true;
+                    }
+                });
+        gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+            @Override
+            public boolean onDown(MotionEvent e) {
+                return true;
+            }
+
+            @Override
+            public boolean onDoubleTap(MotionEvent e) {
+                if (zoomScale > 1.01f) {
+                    resetZoom();
+                } else {
+                    applyZoomFactor(DOUBLE_TAP_ZOOM, e.getX(), e.getY());
+                }
+                return true;
+            }
+        });
+
         findViewById(R.id.root).setOnTouchListener((v, e) -> {
             if (!playersStarted) return false;
+            scaleDetector.onTouchEvent(e);
+            gestureDetector.onTouchEvent(e);
+
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     showOriginal(true);
+                    panPointerId = e.getPointerId(0);
+                    lastPanX = e.getX();
+                    lastPanY = e.getY();
+                    return true;
+                case MotionEvent.ACTION_POINTER_DOWN:
+                    // A second finger joined — that's a pinch; stop single-finger
+                    // panning until we're back down to one.
+                    panPointerId = MotionEvent.INVALID_POINTER_ID;
+                    return true;
+                case MotionEvent.ACTION_POINTER_UP: {
+                    // One finger lifted mid-pinch — resume panning from whichever
+                    // finger remains, without a jump.
+                    if (e.getPointerCount() == 2) {
+                        int liftingIndex = e.getActionIndex();
+                        int remainingIndex = liftingIndex == 0 ? 1 : 0;
+                        panPointerId = e.getPointerId(remainingIndex);
+                        lastPanX = e.getX(remainingIndex);
+                        lastPanY = e.getY(remainingIndex);
+                    }
+                    return true;
+                }
+                case MotionEvent.ACTION_MOVE:
+                    if (zoomScale > 1.01f && e.getPointerCount() == 1
+                            && panPointerId != MotionEvent.INVALID_POINTER_ID) {
+                        int idx = e.findPointerIndex(panPointerId);
+                        if (idx >= 0) {
+                            float x = e.getX(idx), y = e.getY(idx);
+                            panBy(x - lastPanX, y - lastPanY);
+                            lastPanX = x;
+                            lastPanY = y;
+                        }
+                    }
                     return true;
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
                     showOriginal(false);
+                    panPointerId = MotionEvent.INVALID_POINTER_ID;
                     return true;
                 default:
                     return true;
@@ -305,8 +381,11 @@ public class PreviewActivity extends AppCompatActivity {
 
     /**
      * Fits the video into the TextureView with letterboxing, applying the
-     * source rotation (TextureView doesn't honour rotation metadata itself).
-     * Both clips share the source's dimensions, so the same transform applies.
+     * source rotation (TextureView doesn't honour rotation metadata itself),
+     * then layers the user's pinch/pan/double-tap zoom on top in view-pixel
+     * space. Both clips share the source's dimensions, so the same transform
+     * applies to both — that's what keeps the A/B comparison aligned while
+     * zoomed in.
      */
     private void applyTransform(TextureView tv) {
         if (vidW <= 0 || vidH <= 0) return;
@@ -328,7 +407,67 @@ public class PreviewActivity extends AppCompatActivity {
         float sy = (swap ? fw : fh) / vh;
         m.postScale(sx, sy, cx, cy);
         m.postRotate(rotationDeg, cx, cy);
+        m.postScale(zoomScale, zoomScale, cx, cy);
+        m.postTranslate(panX, panY);
         tv.setTransform(m);
+    }
+
+    private void applyTransformToBoth() {
+        applyTransform(texEncoded);
+        applyTransform(texOriginal);
+    }
+
+    /** On-screen size (before zoom) of the letterboxed video, per applyTransform's fit math. */
+    private float[] fittedSize() {
+        int vw = texEncoded.getWidth(), vh = texEncoded.getHeight();
+        boolean swap = (rotationDeg == 90 || rotationDeg == 270);
+        float dispW = swap ? vidH : vidW;
+        float dispH = swap ? vidW : vidH;
+        float scale = Math.min(vw / dispW, vh / dispH);
+        return new float[]{dispW * scale, dispH * scale};
+    }
+
+    /**
+     * Applies a pinch/double-tap zoom step, keeping the content under
+     * (focusX, focusY) visually fixed on screen (the standard pinch-zoom feel).
+     */
+    private void applyZoomFactor(float factor, float focusX, float focusY) {
+        float newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoomScale * factor));
+        float applied = newScale / zoomScale;
+        int vw = texEncoded.getWidth(), vh = texEncoded.getHeight();
+        if (vw == 0 || vh == 0) return;
+        float cx = vw / 2f, cy = vh / 2f;
+        panX = (focusX - cx) - applied * (focusX - cx - panX);
+        panY = (focusY - cy) - applied * (focusY - cy - panY);
+        zoomScale = newScale;
+        clampPan();
+        applyTransformToBoth();
+    }
+
+    private void panBy(float dx, float dy) {
+        if (zoomScale <= 1f) return;
+        panX += dx;
+        panY += dy;
+        clampPan();
+        applyTransformToBoth();
+    }
+
+    private void resetZoom() {
+        zoomScale = 1f;
+        panX = 0f;
+        panY = 0f;
+        applyTransformToBoth();
+    }
+
+    /** Keeps the zoomed content from panning entirely off-screen. */
+    private void clampPan() {
+        int vw = texEncoded.getWidth(), vh = texEncoded.getHeight();
+        if (vw == 0 || vh == 0 || vidW <= 0 || vidH <= 0) return;
+        float[] fit = fittedSize();
+        float maxPanX = Math.max(0f, (fit[0] * zoomScale - vw) / 2f);
+        float maxPanY = Math.max(0f, (fit[1] * zoomScale - vh) / 2f);
+        panX = Math.max(-maxPanX, Math.min(maxPanX, panX));
+        panY = Math.max(-maxPanY, Math.min(maxPanY, panY));
     }
 
     private void releasePlayers() {
