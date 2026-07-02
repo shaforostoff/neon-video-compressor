@@ -94,6 +94,10 @@ public class PreviewActivity extends AppCompatActivity {
             finish();
             return;
         }
+        // x265's preset trades encode speed for compression efficiency at a given
+        // CRF, not visual quality — so previewing always uses the fastest preset
+        // to keep the wait short; the real conversion still honors the user's pick.
+        options.preset = "ultrafast";
 
         encodedFile = new File(getCacheDir(), "preview_encoded.mp4");
         originalFile = new File(getCacheDir(), "preview_original.mp4");
