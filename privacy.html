@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Privacy Policy</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 24px 16px 40px;
+      line-height: 1.6;
+      color: #222;
+      background: #fafafa;
+    }
+    h1, h2 {
+      color: #111;
+    }
+    h1 {
+      margin-bottom: 0.2em;
+    }
+    h2 {
+      margin-top: 1.6em;
+    }
+    a {
+      color: #0066cc;
+    }
+  </style>
+</head>
+<body>
+  <h1>Privacy Policy</h1>
+  <p><strong>Last updated:</strong> July 2, 2026</p>
+
+  <h2>1. Introduction</h2>
+  <p>
+    This application (“Neon Video Compressor”) is a utility app to compress and convert
+    video files on your device. We take user privacy seriously and are committed to being
+    transparent about how Neon Video Compressor handles data.
+  </p>
+
+  <h2>2. Data Collection and Use</h2>
+  <p>
+    Neon Video Compressor does <strong>not collect</strong> personal information, device
+    identifiers, usage analytics, or advertising identifiers. It does not have Internet
+    access and cannot transmit your videos, files, or any other data to any server.
+    All video conversion and compression happens entirely on your device.
+  </p>
+  <p>
+    The app stores your last-used conversion settings (video mode, encoder preset,
+    audio mode, audio bitrate, and quality slider position) in the app's
+    <strong>private on-device storage</strong> (inaccessible to other apps), purely so
+    your preferences are remembered between sessions. No file content or media metadata
+    is included in this data.
+  </p>
+
+  <h2 id="permissions">3. Permissions</h2>
+  <p>Neon Video Compressor requests only the permissions necessary to convert videos on-device:</p>
+  <ul>
+    <li>
+      <strong>Video selection</strong> — the app does not request broad media-library
+      permissions. Instead, you pick the video files to convert yourself using the
+      Android system file picker (Storage Access Framework). The app can only access
+      the specific files you select.
+    </li>
+    <li>
+      <strong>Output files</strong> — converted videos are written directly to your
+      device's shared Movies/Music library via the Android MediaStore, so they appear
+      alongside your other media. Neon Video Compressor never writes outside of this
+      MediaStore location or the files you explicitly chose.
+    </li>
+    <li>
+      <strong>Foreground service</strong> (<code>FOREGROUND_SERVICE</code>,
+      <code>FOREGROUND_SERVICE_MEDIA_PROCESSING</code>,
+      <code>FOREGROUND_SERVICE_DATA_SYNC</code>) — allows long-running video conversions
+      to continue reliably in the background, with a persistent progress notification.
+    </li>
+    <li>
+      <strong>Wake lock</strong> (<code>WAKE_LOCK</code>) — keeps the device awake while
+      a conversion is in progress, so long conversions are not interrupted.
+    </li>
+    <li>
+      <strong>Notifications</strong> (<code>POST_NOTIFICATIONS</code>, Android 13+ only) —
+      used to display progress and completion notifications during conversions.
+    </li>
+  </ul>
+  <p>
+    Neon Video Compressor does not request the <code>INTERNET</code> permission and has
+    no network access. All permission-gated operations are performed
+    <strong>entirely on your device</strong>. No files or metadata are sent to any
+    server or third party.
+  </p>
+
+  <h2>4. Third-Party Sharing</h2>
+  <p>
+    Neon Video Compressor does not share any data with third parties, advertisers,
+    analytics providers, or external services. It contains no ads and no third-party
+    SDKs.
+  </p>
+
+  <h2>5. Security</h2>
+  <p>
+    Because Neon Video Compressor does not collect, store, or transmit any personal
+    data or file content off your device, there is no risk of data leakage or
+    unauthorized access related to user data.
+  </p>
+
+  <h2>6. Changes to This Policy</h2>
+  <p>
+    We may update this Privacy Policy from time to time. Any changes will be posted on this page.
+  </p>
+
+  <h2>7. Contact</h2>
+  <p>
+    If you have any questions about this Privacy Policy, you may contact the developer Mykola Shaforostov at:<br />
+    <strong>Email:</strong> shaforostoff@gmail.com
+  </p>
+</body>
+</html>
