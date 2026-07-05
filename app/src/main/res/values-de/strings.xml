@@ -53,6 +53,11 @@
     <string name="no_app_to_open">Keine App zum Öffnen dieser Datei</string>
     <string name="remove_both_error">Video und Audio können nicht gleichzeitig entfernt werden</string>
 
+    <string name="battery_opt_title">Umwandlung bei gesperrtem Bildschirm fortsetzen</string>
+    <string name="battery_opt_message">Die Videoumwandlung kann lange dauern. Damit Android sie bei ausgeschaltetem Bildschirm nicht anhält, erlaube dieser App, ohne Akku-Einschränkungen zu laufen.</string>
+    <string name="battery_opt_allow">Erlauben</string>
+    <string name="battery_opt_not_now">Jetzt nicht</string>
+
     <string name="error_open_input">Das ausgewählte Video konnte nicht geöffnet werden</string>
     <string name="error_no_video_track">Keine Videospur in der Datei gefunden</string>
     <string name="error_nothing_both_removed">Nichts zu speichern: beide Spuren wurden entfernt</string>

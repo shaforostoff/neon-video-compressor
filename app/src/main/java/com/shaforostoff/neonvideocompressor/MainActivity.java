@@ -8,6 +8,8 @@ import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.SeekBar;
@@ -47,6 +49,9 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_PRESET = "preset";
     private static final String KEY_AUDIO_MODE = "audio_mode";
     private static final String KEY_AUDIO_BITRATE = "audio_bitrate";
+    // Whether we've already offered the Doze battery-optimization exemption, so
+    // the prompt is shown at most once rather than on every conversion.
+    private static final String KEY_BATTERY_PROMPTED = "battery_prompted";
 
     private SharedPreferences prefs;
 
@@ -80,6 +85,13 @@ public class MainActivity extends AppCompatActivity {
     private final ActivityResultLauncher<String> notifPermission =
             registerForActivityResult(new ActivityResultContracts.RequestPermission(),
                     granted -> startConversion());
+
+    // The battery-optimization exemption dialog reports its result via
+    // isIgnoringBatteryOptimizations rather than the result code, so we just
+    // continue with the conversion whatever the user chose in the system dialog.
+    private final ActivityResultLauncher<Intent> batteryExemption =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
+                    result -> startConversion());
 
     // Not required for the Photo Picker itself (it grants per-item read access
     // on its own); only requested so SourceMetadata can recover the real
@@ -357,8 +369,46 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        // Offer the Doze exemption before the first encode. Without it, a long
+        // encode freezes once the device enters deep Doze with the screen off,
+        // because the system stops honouring our PARTIAL_WAKE_LOCK. The dialog is
+        // shown at most once; whatever the user picks, we then start converting.
+        if (shouldOfferBatteryExemption()) {
+            showBatteryExemptionDialog();
+            return;
+        }
+
         ConversionService.start(this, new ArrayList<>(selectedUris), o);
         startActivity(new Intent(this, ProgressActivity.class));
+    }
+
+    /** True only when we haven't asked yet and aren't already exempt from Doze. */
+    private boolean shouldOfferBatteryExemption() {
+        if (prefs.getBoolean(KEY_BATTERY_PROMPTED, false)) return false;
+        PowerManager pm = getSystemService(PowerManager.class);
+        return pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName());
+    }
+
+    private void showBatteryExemptionDialog() {
+        // Remember that we've offered it, so declining doesn't loop back here when
+        // the exemption launcher (or "Not now") calls startConversion() again.
+        prefs.edit().putBoolean(KEY_BATTERY_PROMPTED, true).apply();
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.battery_opt_title)
+                .setMessage(R.string.battery_opt_message)
+                .setCancelable(false)
+                .setNegativeButton(R.string.battery_opt_not_now, (d, w) -> startConversion())
+                .setPositiveButton(R.string.battery_opt_allow, (d, w) -> {
+                    Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:" + getPackageName()));
+                    try {
+                        batteryExemption.launch(i);
+                    } catch (android.content.ActivityNotFoundException e) {
+                        // No handler on this device — just proceed with the encode.
+                        startConversion();
+                    }
+                })
+                .show();
     }
 
     private void onPreviewClicked() {

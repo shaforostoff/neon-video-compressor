@@ -53,6 +53,11 @@
     <string name="no_app_to_open">No hay ninguna app para abrir este archivo</string>
     <string name="remove_both_error">No se pueden eliminar el vídeo y el audio a la vez</string>
 
+    <string name="battery_opt_title">Seguir convirtiendo con la pantalla bloqueada</string>
+    <string name="battery_opt_message">La conversión de vídeo puede tardar mucho. Para que Android no la detenga cuando la pantalla está apagada, permite que esta app funcione sin restricciones de batería.</string>
+    <string name="battery_opt_allow">Permitir</string>
+    <string name="battery_opt_not_now">Ahora no</string>
+
     <string name="error_open_input">No se pudo abrir el vídeo seleccionado</string>
     <string name="error_no_video_track">No se encontró ninguna pista de vídeo en el archivo</string>
     <string name="error_nothing_both_removed">Nada que guardar: se eliminaron ambas pistas</string>

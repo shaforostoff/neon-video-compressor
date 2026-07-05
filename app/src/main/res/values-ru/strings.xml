@@ -53,6 +53,11 @@
     <string name="no_app_to_open">Нет приложения для открытия этого файла</string>
     <string name="remove_both_error">Нельзя удалить и видео, и аудио одновременно</string>
 
+    <string name="battery_opt_title">Продолжать конвертацию при заблокированном экране</string>
+    <string name="battery_opt_message">Конвертация видео может занять много времени. Чтобы Android не приостанавливал её при выключенном экране, разрешите приложению работать без ограничений батареи.</string>
+    <string name="battery_opt_allow">Разрешить</string>
+    <string name="battery_opt_not_now">Не сейчас</string>
+
     <string name="error_open_input">Не удалось открыть выбранное видео</string>
     <string name="error_no_video_track">В файле не найдена видеодорожка</string>
     <string name="error_nothing_both_removed">Нечего сохранять: обе дорожки удалены</string>

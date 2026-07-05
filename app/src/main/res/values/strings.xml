@@ -53,6 +53,11 @@
     <string name="no_app_to_open">No app to open this file</string>
     <string name="remove_both_error">Can\'t remove both video and audio</string>
 
+    <string name="battery_opt_title">Keep converting while locked</string>
+    <string name="battery_opt_message">Video conversion can take a long time. To stop Android from pausing it when the screen is off, allow this app to run without battery restrictions.</string>
+    <string name="battery_opt_allow">Allow</string>
+    <string name="battery_opt_not_now">Not now</string>
+
     <string name="error_open_input">Cannot open the selected video</string>
     <string name="error_no_video_track">No video track found in the input</string>
     <string name="error_nothing_both_removed">Nothing to output: both tracks removed</string>

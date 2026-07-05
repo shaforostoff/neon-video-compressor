@@ -53,6 +53,11 @@
     <string name="no_app_to_open">Nessuna app per aprire questo file</string>
     <string name="remove_both_error">Impossibile rimuovere sia il video che l\'audio</string>
 
+    <string name="battery_opt_title">Continuare la conversione a schermo bloccato</string>
+    <string name="battery_opt_message">La conversione video può richiedere molto tempo. Per evitare che Android la metta in pausa a schermo spento, consenti a questa app di funzionare senza restrizioni della batteria.</string>
+    <string name="battery_opt_allow">Consenti</string>
+    <string name="battery_opt_not_now">Non ora</string>
+
     <string name="error_open_input">Impossibile aprire il video selezionato</string>
     <string name="error_no_video_track">Nessuna traccia video trovata nel file</string>
     <string name="error_nothing_both_removed">Nulla da salvare: entrambe le tracce sono state rimosse</string>
