@@ -85,6 +85,17 @@ public class ConversionService extends Service implements ConversionJob.Listener
         void onUpdate(Snapshot snapshot);
     }
 
+    // Terminal snapshot of the last finished batch. The service stops itself
+    // when done, so a ProgressActivity that was unbound at that moment (screen
+    // off) can never reconnect to fetch the final state — it reads this instead.
+    // Static works because the activity shares the process; if the process died
+    // the done notification already covers the user.
+    private static volatile Snapshot lastTerminal;
+
+    public static Snapshot getLastTerminal() {
+        return lastTerminal;
+    }
+
     private final IBinder binder = new LocalBinder();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Snapshot snapshot = new Snapshot();
@@ -157,6 +168,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
         }
 
         createChannel();
+        lastTerminal = null; // a stale result must not shadow this new run
         snapshot.status = Status.RUNNING;
         snapshot.batchTotal = inputs.size();
         snapshot.batchIndex = 0;
@@ -315,6 +327,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
         snapshot.outputs.clear();
         snapshot.outputs.addAll(collectedOutputs);
 
+        lastTerminal = snapshot;
         pushUpdate(true);
         releaseWakeLock();
         stopForeground(STOP_FOREGROUND_REMOVE);

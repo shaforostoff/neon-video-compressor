@@ -63,6 +63,19 @@ public class ProgressActivity extends AppCompatActivity {
     private boolean paused;
     private boolean finishedState;
 
+    // Binding with flags=0 to a service that already stopped never connects, so
+    // a finish that happened while we were unbound (screen off) would leave the
+    // last rendered frame ("Saving", 98%) on screen forever. If the connection
+    // hasn't come up shortly after onStart, fall back to the terminal snapshot
+    // the service parked before stopping.
+    private static final long BIND_FALLBACK_DELAY_MS = 300L;
+    private final Handler bindFallbackHandler = new Handler(Looper.getMainLooper());
+    private final Runnable bindFallback = () -> {
+        if (bound || finishedState) return;
+        ConversionService.Snapshot t = ConversionService.getLastTerminal();
+        if (t != null) render(t);
+    };
+
     private final ServiceConnection connection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -151,11 +164,13 @@ public class ProgressActivity extends AppCompatActivity {
     protected void onStart() {
         super.onStart();
         bindService(new Intent(this, ConversionService.class), connection, 0);
+        bindFallbackHandler.postDelayed(bindFallback, BIND_FALLBACK_DELAY_MS);
     }
 
     @Override
     protected void onStop() {
         super.onStop();
+        bindFallbackHandler.removeCallbacks(bindFallback);
         stopRamTicker();
         if (bound) {
             service.setUiCallback(null);
