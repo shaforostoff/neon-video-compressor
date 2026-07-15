@@ -299,7 +299,9 @@ public class ProgressActivity extends AppCompatActivity {
                     txtBatch.setVisibility(View.GONE);
                 }
                 txtPhase.setText(paused
-                        ? getString(R.string.phase_paused_format, phaseLabel(s))
+                        ? getString(s.lowMemoryPaused
+                                ? R.string.phase_paused_lowmem_format
+                                : R.string.phase_paused_format, phaseLabel(s))
                         : phaseLabel(s));
                 txtTime.setText(formatTime(s.processedUs) + " / " + formatTime(s.durationUs));
                 txtSpeed.setText(s.speed > 0

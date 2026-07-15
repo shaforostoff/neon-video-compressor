@@ -53,6 +53,7 @@
     <string name="phase_mux">Finalizing</string>
     <string name="phase_publish">Saving</string>
     <string name="phase_paused_format">%1$s (paused)</string>
+    <string name="phase_paused_lowmem_format">%1$s (paused — low memory)</string>
     <string name="batch_file_format">File %1$d of %2$d</string>
     <string name="batch_complete">Batch complete</string>
     <string name="saved_to_music">Saved to Music</string>
@@ -85,6 +86,7 @@
     <string name="notif_title_batch_paused">Paused</string>
     <string name="notif_title_batch_converting">Converting</string>
     <string name="notif_title_single_paused">Conversion paused</string>
+    <string name="notif_title_lowmem_paused">Paused — low memory</string>
     <string name="notif_title_single_converting">Converting video</string>
     <string name="notif_batch_progress_format">%1$s · %2$d/%3$d</string>
     <string name="notif_text_format">%1$s · %2$d%%</string>

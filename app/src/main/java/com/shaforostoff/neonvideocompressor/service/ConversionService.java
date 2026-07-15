@@ -1,10 +1,12 @@
 package com.shaforostoff.neonvideocompressor.service;
 
+import android.app.ActivityManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.ComponentCallbacks2;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
@@ -72,6 +74,9 @@ public class ConversionService extends Service implements ConversionJob.Listener
         public int failed;
         public String currentName;     // display name of the current source file
         public boolean audioOnly;      // output has no video track (.m4a)
+        // True while the current pause was forced by the system-memory guard
+        // (not the user). Lets the UI/notification explain why it stopped.
+        public boolean lowMemoryPaused;
         // True when the (last) output was stopped early and holds only the
         // beginning of the source. Consumers must not treat such a file as a
         // full replacement for the original.
@@ -115,6 +120,22 @@ public class ConversionService extends Service implements ConversionJob.Listener
     private volatile boolean batchStopped; // graceful stop: keep the partial file, skip the rest
     private long lastNotifMs = 0;
 
+    // --- low-memory auto-pause guard (main thread only) --------------------
+    // When the system reports memory pressure while we are actively encoding
+    // video, we pause the job: the native pause tears the x265 encoder down and
+    // frees its frame pool (hundreds of MB) within a second or two, which keeps
+    // us from being killed. We then poll device memory and auto-resume once it
+    // has recovered with margin, using hysteresis + a dwell so we don't flap
+    // (freeing our own RAM is what lifts availMem, so a naive resume oscillates).
+    private static final long RESUME_CHECK_MS = 4000;   // poll cadence while paused
+    private static final int RESUME_STREAK = 2;         // consecutive healthy polls to resume
+    private static final long MIN_PAUSE_MS = 8000;      // minimum time to stay paused
+    private static final float RESUME_MULT = 2.0f;      // availMem must exceed threshold*this
+    private boolean autoPaused;        // current pause was forced by this guard
+    private long autoPauseAtMs;
+    private int healthyStreak;
+    private final Runnable resumeCheck = this::checkAutoResume;
+
     // Aggregated results across the batch (worker-thread only).
     private Uri lastOutput;
     private String lastDisplayName;
@@ -140,7 +161,92 @@ public class ConversionService extends Service implements ConversionJob.Listener
     @Override
     public void onDestroy() {
         super.onDestroy();
+        main.removeCallbacks(resumeCheck);
         releaseWakeLock();
+    }
+
+    /**
+     * System memory-pressure signal (main thread). We react ONLY to the
+     * running-pressure levels — {@code RUNNING_LOW}/{@code RUNNING_CRITICAL} —
+     * which mean the device is low on memory while we are still active. The
+     * higher-valued levels ({@code UI_HIDDEN}, {@code BACKGROUND}, …) merely
+     * mean the app went to the background, which is the normal case here (the
+     * user leaves while a video encodes) and must NOT pause anything.
+     */
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
+                || level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
+            autoPauseForMemory();
+        }
+    }
+
+    /**
+     * Pause the running job to release the encoder's RAM. No-op unless we are
+     * actively encoding video (the only phase that holds the large x265 pool and
+     * can free it on pause) and not already paused.
+     */
+    private void autoPauseForMemory() {
+        synchronized (controlLock) {
+            if (control == null || control.paused) return;
+            if (snapshot.phase != ConversionJob.Phase.VIDEO) return;
+            control.setPaused(true);
+        }
+        autoPaused = true;
+        autoPauseAtMs = SystemClock.elapsedRealtime();
+        healthyStreak = 0;
+        snapshot.status = Status.PAUSED;
+        snapshot.lowMemoryPaused = true;
+        main.removeCallbacks(resumeCheck);
+        main.postDelayed(resumeCheck, RESUME_CHECK_MS);
+        pushUpdate(true);
+    }
+
+    /**
+     * While auto-paused, poll device memory and resume once it has recovered
+     * with margin for RESUME_STREAK consecutive checks and we have stayed paused
+     * at least MIN_PAUSE_MS. Reschedules itself until then.
+     */
+    private void checkAutoResume() {
+        if (!autoPaused) return;
+        synchronized (controlLock) {
+            if (control == null) { autoPaused = false; return; } // file finished/cancelled
+        }
+
+        ActivityManager am = getSystemService(ActivityManager.class);
+        boolean healthy = false;
+        if (am != null) {
+            ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+            am.getMemoryInfo(mi);
+            healthy = !mi.lowMemory && mi.availMem > mi.threshold * RESUME_MULT;
+        }
+        healthyStreak = healthy ? healthyStreak + 1 : 0;
+
+        boolean dwellOk = SystemClock.elapsedRealtime() - autoPauseAtMs >= MIN_PAUSE_MS;
+        if (healthyStreak >= RESUME_STREAK && dwellOk) {
+            autoResume();
+        } else {
+            main.postDelayed(resumeCheck, RESUME_CHECK_MS);
+        }
+    }
+
+    private void autoResume() {
+        synchronized (controlLock) {
+            if (control != null) control.setPaused(false);
+        }
+        autoPaused = false;
+        healthyStreak = 0;
+        snapshot.status = Status.RUNNING;
+        snapshot.lowMemoryPaused = false;
+        pushUpdate(true);
+    }
+
+    /** Cancel any pending auto-resume and drop the auto-pause classification. */
+    private void clearMemoryGuard() {
+        autoPaused = false;
+        snapshot.lowMemoryPaused = false;
+        main.removeCallbacks(resumeCheck);
     }
 
     @Override
@@ -204,6 +310,8 @@ public class ConversionService extends Service implements ConversionJob.Listener
             snapshot.liveOutputBytes = 0;
             snapshot.currentName = queryName(input);
             snapshot.status = Status.RUNNING;
+            snapshot.lowMemoryPaused = false;
+            main.post(this::clearMemoryGuard); // drop any stale auto-resume from the previous file
             currentInputBytes = queryUriSize(input);
             pushUpdate(true);
 
@@ -393,6 +501,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
     }
 
     public void pause() {
+        clearMemoryGuard(); // an explicit user pause is not auto-resumed
         synchronized (controlLock) {
             if (control != null) {
                 control.setPaused(true);
@@ -403,6 +512,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
     }
 
     public void resume() {
+        clearMemoryGuard(); // user override cancels any pending auto-resume
         synchronized (controlLock) {
             if (control != null) {
                 control.setPaused(false);
@@ -413,6 +523,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
     }
 
     public void cancel() {
+        clearMemoryGuard();
         batchCancelled = true;
         synchronized (controlLock) {
             if (control != null) control.cancel();
@@ -426,6 +537,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
      * in any other phase there is nothing worth keeping, so this cancels.
      */
     public void stopAndSave() {
+        clearMemoryGuard();
         batchStopped = true;
         synchronized (controlLock) {
             if (control != null) {
@@ -471,11 +583,15 @@ public class ConversionService extends Service implements ConversionJob.Listener
         boolean batch = snapshot.batchTotal > 1;
         int percent = Math.round(snapshot.batchFraction() * 100);
 
+        boolean lowMem = paused && snapshot.lowMemoryPaused;
         String title;
         if (batch) {
+            int pausedTitle = lowMem ? R.string.notif_title_lowmem_paused : R.string.notif_title_batch_paused;
             title = getString(R.string.notif_batch_progress_format,
-                    getString(paused ? R.string.notif_title_batch_paused : R.string.notif_title_batch_converting),
+                    getString(paused ? pausedTitle : R.string.notif_title_batch_converting),
                     snapshot.batchIndex + 1, snapshot.batchTotal);
+        } else if (lowMem) {
+            title = getString(R.string.notif_title_lowmem_paused);
         } else {
             title = getString(paused ? R.string.notif_title_single_paused : R.string.notif_title_single_converting);
         }
