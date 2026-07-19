@@ -33,6 +33,9 @@ public final class ResultStore {
     private static final String KEY_BATCH_TOTAL = "batch_total";
     private static final String KEY_INPUT_URI = "input_uri";
     private static final String KEY_OUTPUTS = "outputs"; // '\n'-joined uri strings
+    // '\n'-joined source uri per output (parallel to KEY_OUTPUTS); "-" = none.
+    private static final String KEY_OUTPUT_SOURCES = "output_sources";
+    private static final String NO_SOURCE = "-";
 
     private ResultStore() {
     }
@@ -52,6 +55,13 @@ public final class ResultStore {
             if (joined.length() > 0) joined.append('\n');
             joined.append(u.toString());
         }
+        // Parallel source list, aligned 1:1 with outputs ("-" for none/partial).
+        StringBuilder sources = new StringBuilder();
+        for (int i = 0; i < s.outputs.size(); i++) {
+            if (i > 0) sources.append('\n');
+            Uri src = i < s.outputSources.size() ? s.outputSources.get(i) : null;
+            sources.append(src != null ? src.toString() : NO_SOURCE);
+        }
         prefs(ctx).edit()
                 .putBoolean(KEY_PRESENT, true)
                 .putBoolean(KEY_ACKED, false)
@@ -61,6 +71,7 @@ public final class ResultStore {
                 .putInt(KEY_BATCH_TOTAL, Math.max(1, s.batchTotal))
                 .putString(KEY_INPUT_URI, s.inputUri != null ? s.inputUri.toString() : null)
                 .putString(KEY_OUTPUTS, joined.toString())
+                .putString(KEY_OUTPUT_SOURCES, sources.toString())
                 .apply();
     }
 
@@ -115,6 +126,25 @@ public final class ResultStore {
         s.inputUri = input != null ? Uri.parse(input) : null;
         s.output = outputs.get(0);
         s.outputs.addAll(outputs);
+
+        // Rebuild the per-output source list. Fall back gracefully for records
+        // written before this key existed (single file -> derive from inputUri).
+        String srcJoined = p.getString(KEY_OUTPUT_SOURCES, null);
+        if (srcJoined != null && !srcJoined.isEmpty()) {
+            String[] parts = srcJoined.split("\n", -1);
+            if (parts.length == outputs.size()) {
+                for (String part : parts) {
+                    s.outputSources.add(NO_SOURCE.equals(part) || part.isEmpty()
+                            ? null : Uri.parse(part));
+                }
+            }
+        }
+        if (s.outputSources.isEmpty()) {
+            for (int i = 0; i < outputs.size(); i++) {
+                s.outputSources.add(i == 0 && outputs.size() == 1 && !s.partial
+                        ? s.inputUri : null);
+            }
+        }
         return s;
     }
 

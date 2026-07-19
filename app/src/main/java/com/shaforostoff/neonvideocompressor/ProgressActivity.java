@@ -45,7 +45,6 @@ import com.shaforostoff.neonvideocompressor.service.ResultStore;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Locale;
 
 public class ProgressActivity extends AppCompatActivity {
@@ -58,6 +57,10 @@ public class ProgressActivity extends AppCompatActivity {
     // Cached results so Open/Share survive rotation at DONE (the service may have
     // already stopped, so the recreated activity can't rely on a fresh snapshot).
     private final ArrayList<Uri> resultOutputs = new ArrayList<>();
+    // Parallel to resultOutputs: the source of each output, or null when it can't
+    // be replaced (partial output, or a batch member that failed). Drives the
+    // "Replace original(s)" offer for both single and batch conversions.
+    private final ArrayList<Uri> resultOutputSources = new ArrayList<>();
     private boolean resultAudioOnly;
     // Source of a single-file conversion + whether the output is partial: decide
     // if "Replace original" may be offered (never for a stopped-early file).
@@ -65,6 +68,7 @@ public class ProgressActivity extends AppCompatActivity {
     private boolean resultPartial;
 
     private static final String STATE_OUTPUTS = "result_outputs";
+    private static final String STATE_OUTPUT_SOURCES = "result_output_sources";
     private static final String STATE_AUDIO_ONLY = "result_audio_only";
     private static final String STATE_FINISHED = "finished_state";
     private static final String STATE_INPUT_URI = "result_input_uri";
@@ -95,26 +99,45 @@ public class ProgressActivity extends AppCompatActivity {
     // offer to save a partial file (only the direct video encode can).
     private ConversionJob.Phase lastPhase = ConversionJob.Phase.PROBING;
 
-    // Deleting the original usually needs the user's consent through a system
-    // dialog (MediaStore delete request / RecoverableSecurityException).
-    private Uri pendingDeleteUri; // API 29 retry target after consent
+    // One queued "replace a source with its compressed output" operation.
+    private static final class ReplaceItem {
+        final int index;    // position in resultOutputs
+        final Uri output;   // compressed, app-owned file to move into place
+        final Uri mediaUri; // resolved source MediaStore item to delete
+        String volume, relPath, baseName; // source location, captured before delete
+        ReplaceItem(int index, Uri output, Uri mediaUri) {
+            this.index = index;
+            this.output = output;
+            this.mediaUri = mediaUri;
+        }
+    }
 
-    // Where the original lived (captured before it is deleted) so the compressed
-    // file can be moved into its place — possibly on another volume (SD card).
-    private String replaceVolume, replaceRelPath, replaceBaseName;
-    private final ActivityResultLauncher<IntentSenderRequest> deleteRequestLauncher =
+    // Sources whose delete is awaiting the system consent dialog; their outputs
+    // are moved into place once consent is granted.
+    private final ArrayList<ReplaceItem> pendingReplace = new ArrayList<>();
+    private int replaceMediaCount;  // how many MediaStore sources this run targets
+    private int api29Index;         // API 29: index currently being deleted one-by-one
+
+    // R+ (API 30+): a single consent dialog deletes every source at once.
+    private final ActivityResultLauncher<IntentSenderRequest> batchDeleteLauncher =
             registerForActivityResult(new ActivityResultContracts.StartIntentSenderForResult(), result -> {
-                if (result.getResultCode() != RESULT_OK) return; // user declined
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    // createDeleteRequest already performed the deletion.
-                    onOriginalDeleted();
-                } else {
-                    // API 29: consent granted, the delete must be re-issued.
-                    Uri uri = pendingDeleteUri;
-                    pendingDeleteUri = null;
+                if (result.getResultCode() != RESULT_OK) { // declined: nothing deleted
+                    pendingReplace.clear();
+                    return;
+                }
+                for (ReplaceItem it : pendingReplace) applyReplaceMove(it);
+                pendingReplace.clear();
+                finishReplace();
+            });
+
+    // API 29: consent is per-file; on grant, re-issue that delete and continue.
+    private final ActivityResultLauncher<IntentSenderRequest> singleDeleteLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartIntentSenderForResult(), result -> {
+                if (result.getResultCode() == RESULT_OK && api29Index < pendingReplace.size()) {
+                    ReplaceItem it = pendingReplace.get(api29Index);
                     try {
-                        if (uri != null && getContentResolver().delete(uri, null, null) > 0) {
-                            onOriginalDeleted();
+                        if (getContentResolver().delete(it.mediaUri, null, null) > 0) {
+                            applyReplaceMove(it);
                         } else {
                             toastReplaceFailed();
                         }
@@ -122,6 +145,7 @@ public class ProgressActivity extends AppCompatActivity {
                         toastReplaceFailed();
                     }
                 }
+                deleteNextApi29(api29Index + 1);
             });
 
     // Binding with flags=0 to a service that already stopped never connects, so
@@ -215,13 +239,15 @@ public class ProgressActivity extends AppCompatActivity {
             startActivity(OutputActions.share(this, resultOutputs, resultAudioOnly,
                     getString(R.string.share_via)));
         });
-        btnReplace.setOnClickListener(v -> confirmReplaceOriginal());
+        btnReplace.setOnClickListener(v -> confirmReplace());
 
         // Restore cached results so Open/Share work after a rotation at DONE even
         // if the service has already stopped and the rebind finds it gone.
         if (savedInstanceState != null) {
             ArrayList<Uri> saved = savedInstanceState.getParcelableArrayList(STATE_OUTPUTS);
             if (saved != null) resultOutputs.addAll(saved);
+            ArrayList<Uri> savedSources = savedInstanceState.getParcelableArrayList(STATE_OUTPUT_SOURCES);
+            if (savedSources != null) resultOutputSources.addAll(savedSources);
             resultAudioOnly = savedInstanceState.getBoolean(STATE_AUDIO_ONLY);
             finishedState = savedInstanceState.getBoolean(STATE_FINISHED);
             resultInputUri = savedInstanceState.getParcelable(STATE_INPUT_URI);
@@ -230,7 +256,7 @@ public class ProgressActivity extends AppCompatActivity {
                 btnPauseResume.setEnabled(false);
                 btnCancel.setText(R.string.close);
                 rowResultActions.setVisibility(resultOutputs.isEmpty() ? View.GONE : View.VISIBLE);
-                btnReplace.setVisibility(canReplaceOriginal() ? View.VISIBLE : View.GONE);
+                updateReplaceButton();
                 showBitrateComparison(); // recompute after rotation (not saved in state)
             }
         }
@@ -240,6 +266,7 @@ public class ProgressActivity extends AppCompatActivity {
     protected void onSaveInstanceState(Bundle out) {
         super.onSaveInstanceState(out);
         out.putParcelableArrayList(STATE_OUTPUTS, resultOutputs);
+        out.putParcelableArrayList(STATE_OUTPUT_SOURCES, resultOutputSources);
         out.putBoolean(STATE_AUDIO_ONLY, resultAudioOnly);
         out.putBoolean(STATE_FINISHED, finishedState);
         out.putParcelable(STATE_INPUT_URI, resultInputUri);
@@ -357,11 +384,13 @@ public class ProgressActivity extends AppCompatActivity {
                 // Open/Share — covers full and partial success.
                 resultOutputs.clear();
                 resultOutputs.addAll(s.outputs);
+                resultOutputSources.clear();
+                resultOutputSources.addAll(s.outputSources);
                 resultAudioOnly = s.audioOnly;
                 resultInputUri = s.inputUri;
                 resultPartial = s.partial;
                 rowResultActions.setVisibility(resultOutputs.isEmpty() ? View.GONE : View.VISIBLE);
-                btnReplace.setVisibility(canReplaceOriginal() ? View.VISIBLE : View.GONE);
+                updateReplaceButton();
                 showBitrateComparison();
                 Toast.makeText(this, s.message != null ? s.message : savedTo,
                         Toast.LENGTH_LONG).show();
@@ -398,98 +427,158 @@ public class ProgressActivity extends AppCompatActivity {
         }
     }
 
-    // --- Replace original (delete the source file) ---------------------------
+    // --- Replace original(s): delete each source, move its output into place ----
 
-    /**
-     * Replacing is only offered for a fully converted single file whose source
-     * we still know. A partial (stopped-early) output must never replace the
-     * original.
-     */
-    private boolean canReplaceOriginal() {
-        return !resultPartial && resultInputUri != null && !resultOutputs.isEmpty();
+    /** Number of outputs whose source is still known and replaceable (never partial). */
+    private int replaceableCount() {
+        int n = 0;
+        for (int i = 0; i < resultOutputs.size(); i++) {
+            if (i < resultOutputSources.size() && resultOutputSources.get(i) != null) n++;
+        }
+        return n;
     }
 
-    private void confirmReplaceOriginal() {
-        if (!canReplaceOriginal()) return;
-        // Picker uris redact the display name; resolve the real item for a
-        // recognizable name in the dialog.
-        Uri nameSource = isPhotoPickerUri(resultInputUri)
-                ? findMediaStoreUri(resultInputUri) : resultInputUri;
-        String name = nameSource != null ? queryDisplayName(nameSource) : null;
+    private void updateReplaceButton() {
+        int count = replaceableCount();
+        btnReplace.setVisibility(count > 0 ? View.VISIBLE : View.GONE);
+        btnReplace.setText(count > 1 ? R.string.replace_originals : R.string.replace_original);
+    }
+
+    private Uri firstReplaceableSource() {
+        for (int i = 0; i < resultOutputs.size(); i++) {
+            if (i < resultOutputSources.size() && resultOutputSources.get(i) != null) {
+                return resultOutputSources.get(i);
+            }
+        }
+        return null;
+    }
+
+    private void confirmReplace() {
+        int count = replaceableCount();
+        if (count == 0) return;
+        String title, message;
+        if (count == 1) {
+            // Picker uris redact the display name; resolve the real item for a
+            // recognizable name in the dialog.
+            Uri src = firstReplaceableSource();
+            Uri nameSource = src != null && isPhotoPickerUri(src) ? findMediaStoreUri(src) : src;
+            String name = nameSource != null ? queryDisplayName(nameSource) : null;
+            title = getString(R.string.replace_confirm_title);
+            message = getString(R.string.replace_confirm_message,
+                    name != null ? name : getString(R.string.replace_this_video));
+        } else {
+            title = getString(R.string.replace_confirm_title_batch);
+            message = getString(R.string.replace_confirm_message_batch, count);
+        }
         new MaterialAlertDialogBuilder(this)
-                .setTitle(R.string.replace_confirm_title)
-                .setMessage(getString(R.string.replace_confirm_message,
-                        name != null ? name : getString(R.string.replace_this_video)))
-                .setPositiveButton(R.string.replace_confirm_delete,
-                        (d, w) -> deleteOriginal(resultInputUri))
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton(R.string.replace_confirm_delete, (d, w) -> startReplace())
                 .setNegativeButton(R.string.cancel, null)
                 .show();
     }
 
     /**
-     * Deletes the source file. Depending on where the video came from this is a
-     * SAF document delete, or a MediaStore delete that first bounces through a
-     * system consent dialog (we don't own the file).
+     * Builds and runs the replace plan: resolve each source to a MediaStore item,
+     * capture its location, then delete (one batched consent on R+, per-file on
+     * API 29) and move the compressed output into place. SAF documents with no
+     * MediaStore backing are deleted directly (the compressed copy stays put).
      */
-    private void deleteOriginal(Uri uri) {
-        android.util.Log.i(TAG_REPLACE, "deleteOriginal: " + uri);
-        try {
-            if (DocumentsContract.isDocumentUri(this, uri)) {
-                // SAF picker uri: prefer the underlying MediaStore item so the
-                // system consent flow applies; else delete through the provider.
-                Uri media = null;
-                try {
-                    media = MediaStore.getMediaUri(this, uri);
-                } catch (Exception e) {
-                    android.util.Log.w(TAG_REPLACE, "getMediaUri failed", e);
-                }
-                android.util.Log.i(TAG_REPLACE, "document uri -> media uri: " + media);
-                if (media != null) {
-                    uri = media;
-                } else {
-                    if (DocumentsContract.deleteDocument(getContentResolver(), uri)) {
-                        onOriginalDeleted();
-                    } else {
-                        android.util.Log.w(TAG_REPLACE, "deleteDocument returned false");
-                        toastReplaceFailed();
-                    }
-                    return;
-                }
-            } else if (isPhotoPickerUri(uri)) {
-                // Photo-picker grants are read-only; find the real item.
-                Uri media = findMediaStoreUri(uri);
-                android.util.Log.i(TAG_REPLACE, "picker uri -> media uri: " + media);
-                if (media == null) {
-                    toastReplaceFailed();
-                    return;
-                }
-                uri = media;
+    private void startReplace() {
+        pendingReplace.clear();
+        for (int i = 0; i < resultOutputs.size(); i++) {
+            Uri source = i < resultOutputSources.size() ? resultOutputSources.get(i) : null;
+            if (source == null) continue;
+            Uri media = resolveToMediaUri(source);
+            if (media == null) {
+                deleteSafDocument(source, i);
+                continue;
             }
+            ReplaceItem item = new ReplaceItem(i, resultOutputs.get(i), media);
+            String[] loc = captureLocation(media);
+            if (loc != null) {
+                item.volume = loc[0];
+                item.relPath = loc[1];
+                item.baseName = loc[2];
+            }
+            pendingReplace.add(item);
+        }
+        replaceMediaCount = pendingReplace.size();
+        if (pendingReplace.isEmpty()) return; // SAF-only case handled inline above
 
-            captureOriginalLocation(uri);
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                PendingIntent pi = MediaStore.createDeleteRequest(
-                        getContentResolver(), Collections.singletonList(uri));
-                deleteRequestLauncher.launch(
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            ArrayList<Uri> uris = new ArrayList<>();
+            for (ReplaceItem it : pendingReplace) uris.add(it.mediaUri);
+            try {
+                PendingIntent pi = MediaStore.createDeleteRequest(getContentResolver(), uris);
+                batchDeleteLauncher.launch(
                         new IntentSenderRequest.Builder(pi.getIntentSender()).build());
+            } catch (Exception e) {
+                android.util.Log.w(TAG_REPLACE, "batch delete request failed", e);
+                toastReplaceFailed();
+                pendingReplace.clear();
+            }
+        } else {
+            deleteNextApi29(0);
+        }
+    }
+
+    /** API 29: delete one source at a time, requesting consent when the system demands it. */
+    private void deleteNextApi29(int index) {
+        if (index >= pendingReplace.size()) {
+            pendingReplace.clear();
+            finishReplace();
+            return;
+        }
+        api29Index = index;
+        ReplaceItem it = pendingReplace.get(index);
+        try {
+            if (getContentResolver().delete(it.mediaUri, null, null) > 0) {
+                applyReplaceMove(it);
             } else {
-                try {
-                    if (getContentResolver().delete(uri, null, null) > 0) {
-                        onOriginalDeleted();
-                    } else {
-                        android.util.Log.w(TAG_REPLACE, "resolver.delete returned 0");
-                        toastReplaceFailed();
-                    }
-                } catch (RecoverableSecurityException e) {
-                    pendingDeleteUri = uri;
-                    deleteRequestLauncher.launch(new IntentSenderRequest.Builder(
-                            e.getUserAction().getActionIntent().getIntentSender()).build());
-                }
+                toastReplaceFailed();
+            }
+            deleteNextApi29(index + 1);
+        } catch (RecoverableSecurityException e) {
+            // Resumes in singleDeleteLauncher, which advances to index+1.
+            singleDeleteLauncher.launch(new IntentSenderRequest.Builder(
+                    e.getUserAction().getActionIntent().getIntentSender()).build());
+        } catch (Exception e) {
+            toastReplaceFailed();
+            deleteNextApi29(index + 1);
+        }
+    }
+
+    /** A SAF document with no MediaStore item: delete it directly; the output stays where it was. */
+    private void deleteSafDocument(Uri source, int index) {
+        try {
+            if (DocumentsContract.isDocumentUri(this, source)
+                    && DocumentsContract.deleteDocument(getContentResolver(), source)) {
+                markReplaced(index);
+                Toast.makeText(this, R.string.replace_move_failed, Toast.LENGTH_SHORT).show();
+            } else {
+                toastReplaceFailed();
             }
         } catch (Exception e) {
-            android.util.Log.w(TAG_REPLACE, "deleteOriginal failed for " + uri, e);
+            android.util.Log.w(TAG_REPLACE, "SAF delete failed for " + source, e);
             toastReplaceFailed();
+        }
+    }
+
+    /** Resolve a source (picker / SAF / plain media) uri to a deletable MediaStore item, or null. */
+    private Uri resolveToMediaUri(Uri uri) {
+        try {
+            if (DocumentsContract.isDocumentUri(this, uri)) {
+                try {
+                    return MediaStore.getMediaUri(this, uri);
+                } catch (Exception e) {
+                    return null; // SAF doc with no MediaStore backing
+                }
+            }
+            if (isPhotoPickerUri(uri)) return findMediaStoreUri(uri);
+            return uri; // already a MediaStore item
+        } catch (Exception e) {
+            return null;
         }
     }
 
@@ -551,55 +640,67 @@ public class ProgressActivity extends AppCompatActivity {
         return null;
     }
 
-    /** Remembers the original's volume, folder and base name for the move step. */
-    private void captureOriginalLocation(Uri mediaUri) {
-        replaceVolume = null;
-        replaceRelPath = null;
-        replaceBaseName = null;
+    /** @return {volume, relPath, baseName} for a media uri, or null if it can't be read. */
+    private String[] captureLocation(Uri mediaUri) {
         try (Cursor c = getContentResolver().query(mediaUri, new String[]{
                 MediaStore.MediaColumns.VOLUME_NAME,
                 MediaStore.MediaColumns.RELATIVE_PATH,
                 MediaStore.MediaColumns.DISPLAY_NAME}, null, null, null)) {
             if (c != null && c.moveToFirst()) {
-                replaceVolume = c.getString(0);
-                replaceRelPath = c.getString(1);
                 String name = c.getString(2);
+                String base = name;
                 if (name != null) {
                     int dot = name.lastIndexOf('.');
-                    replaceBaseName = dot > 0 ? name.substring(0, dot) : name;
+                    if (dot > 0) base = name.substring(0, dot);
                 }
+                return new String[]{c.getString(0), c.getString(1), base};
             }
         } catch (Exception e) {
-            android.util.Log.w(TAG_REPLACE, "captureOriginalLocation failed", e);
+            android.util.Log.w(TAG_REPLACE, "captureLocation failed", e);
         }
+        return null;
     }
 
-    private void onOriginalDeleted() {
-        resultInputUri = null;
-        btnReplace.setVisibility(View.GONE);
-        if (replaceVolume != null && replaceRelPath != null && replaceBaseName != null
-                && !resultOutputs.isEmpty()) {
-            moveOutputToOriginalLocation();
+    /** A source was deleted: drop it from the replaceable set and move its output into place. */
+    private void applyReplaceMove(ReplaceItem it) {
+        markReplaced(it.index);
+        if (it.volume != null && it.relPath != null && it.baseName != null) {
+            moveOutputToLocation(it);
         } else {
-            // Location unknown (e.g. deleted through a non-media document
-            // provider): the compressed file stays where it was saved.
+            // Location unknown: the compressed file stays where it was saved.
             Toast.makeText(this, R.string.replace_move_failed, Toast.LENGTH_LONG).show();
         }
     }
 
+    private void markReplaced(int index) {
+        if (index >= 0 && index < resultOutputSources.size()) resultOutputSources.set(index, null);
+        if (index == 0) resultInputUri = null; // keep the single-file field in sync
+    }
+
+    /** Called once the whole replace run's deletions are done: one summary toast + button refresh. */
+    private void finishReplace() {
+        if (replaceMediaCount > 0) {
+            Toast.makeText(this, replaceMediaCount > 1
+                    ? R.string.replace_done_batch : R.string.replace_done, Toast.LENGTH_LONG).show();
+        }
+        replaceMediaCount = 0;
+        updateReplaceButton();
+    }
+
     /**
-     * Moves the compressed file into the deleted original's folder under the
-     * original's (base) name. RELATIVE_PATH updates cannot cross volumes (the
-     * original may be on the SD card while we saved to internal Movies/), so
-     * this copies into a fresh MediaStore item on the target volume and then
-     * deletes the app-owned source item. Runs on a background thread.
+     * Moves a compressed output into the deleted source's folder under the
+     * source's (base) name. RELATIVE_PATH updates cannot cross volumes (the source
+     * may be on the SD card while we saved to internal Movies/), so this copies
+     * into a fresh MediaStore item on the target volume and then deletes the
+     * app-owned output. Runs on a background thread.
      */
-    private void moveOutputToOriginalLocation() {
-        final Uri source = resultOutputs.get(0);
+    private void moveOutputToLocation(ReplaceItem it) {
+        final int index = it.index;
+        final Uri output = it.output;
         final boolean audioOnly = resultAudioOnly;
-        final String volume = replaceVolume;
-        final String relPath = replaceRelPath;
-        final String newName = replaceBaseName + (audioOnly ? ".m4a" : ".mp4");
+        final String volume = it.volume;
+        final String relPath = it.relPath;
+        final String newName = it.baseName + (audioOnly ? ".m4a" : ".mp4");
         new Thread(() -> {
             Uri dest = null;
             try {
@@ -614,7 +715,7 @@ public class ProgressActivity extends AppCompatActivity {
                 dest = getContentResolver().insert(collection, values);
                 if (dest == null) throw new java.io.IOException("insert failed");
 
-                try (java.io.InputStream in = getContentResolver().openInputStream(source);
+                try (java.io.InputStream in = getContentResolver().openInputStream(output);
                      java.io.OutputStream out = getContentResolver().openOutputStream(dest, "w")) {
                     if (in == null || out == null) throw new java.io.IOException("open streams failed");
                     byte[] buf = new byte[1 << 20];
@@ -626,12 +727,11 @@ public class ProgressActivity extends AppCompatActivity {
                 done.put(MediaStore.MediaColumns.IS_PENDING, 0);
                 getContentResolver().update(dest, done, null, null);
 
-                getContentResolver().delete(source, null, null); // app-owned: no consent needed
+                getContentResolver().delete(output, null, null); // app-owned: no consent needed
 
                 final Uri finalDest = dest;
                 runOnUiThread(() -> {
-                    if (!resultOutputs.isEmpty()) resultOutputs.set(0, finalDest);
-                    Toast.makeText(this, R.string.replace_done, Toast.LENGTH_LONG).show();
+                    if (index >= 0 && index < resultOutputs.size()) resultOutputs.set(index, finalDest);
                 });
             } catch (Exception e) {
                 android.util.Log.w(TAG_REPLACE, "move to original location failed", e);

@@ -100,4 +100,18 @@
     <string name="summary_all_failed">Tutte le %1$d conversioni non sono riuscite</string>
     <string name="summary_all_failed_reason">Tutte le %1$d conversioni non sono riuscite: %2$s</string>
     <string name="summary_partial">Convertiti %1$d di %2$d (%3$d non riusciti)</string>
+    <string name="encode_hevc_hw">Codifica HEVC (%1$s)</string>
+    <string name="hw_quality_label">Qualità: %1$d%% (CQ)</string>
+    <string name="hw_bitrate_label">Bitrate: %1$s Mbps</string>
+    <string name="mode_cbr">CBR</string>
+    <string name="mode_vbr">VBR</string>
+    <string name="result_bitrate_video">Video: %1$s → %2$s</string>
+    <string name="result_bitrate_audio">Audio: %1$s → %2$s</string>
+    <string name="bitrate_mbps">%1$s Mbps</string>
+    <string name="bitrate_kbps">%1$d kbps</string>
+    <string name="bitrate_none">—</string>
+    <string name="replace_originals">Sostituisci originali</string>
+    <string name="replace_confirm_title_batch">Sostituire gli originali?</string>
+    <string name="replace_confirm_message_batch">%1$d video originali verranno eliminati definitivamente. Le versioni compresse restano nella tua libreria. L\'operazione non può essere annullata.</string>
+    <string name="replace_done_batch">Originali sostituiti</string>
 </resources>

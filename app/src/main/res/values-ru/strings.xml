@@ -100,4 +100,18 @@
     <string name="summary_all_failed">Все %1$d конвертации не удались</string>
     <string name="summary_all_failed_reason">Все %1$d конвертации не удались: %2$s</string>
     <string name="summary_partial">Сконвертировано %1$d из %2$d (ошибок: %3$d)</string>
+    <string name="encode_hevc_hw">Кодировать HEVC (%1$s)</string>
+    <string name="hw_quality_label">Качество: %1$d%% (CQ)</string>
+    <string name="hw_bitrate_label">Битрейт: %1$s Мбит/с</string>
+    <string name="mode_cbr">CBR</string>
+    <string name="mode_vbr">VBR</string>
+    <string name="result_bitrate_video">Видео: %1$s → %2$s</string>
+    <string name="result_bitrate_audio">Аудио: %1$s → %2$s</string>
+    <string name="bitrate_mbps">%1$s Мбит/с</string>
+    <string name="bitrate_kbps">%1$d кбит/с</string>
+    <string name="bitrate_none">—</string>
+    <string name="replace_originals">Заменить оригиналы</string>
+    <string name="replace_confirm_title_batch">Заменить оригиналы?</string>
+    <string name="replace_confirm_message_batch">%1$d исходных видео будут безвозвратно удалены. Сжатые версии останутся в вашей библиотеке. Это действие нельзя отменить.</string>
+    <string name="replace_done_batch">Оригиналы заменены</string>
 </resources>

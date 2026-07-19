@@ -100,4 +100,18 @@
     <string name="summary_all_failed">Усі %1$d конвертації не вдалися</string>
     <string name="summary_all_failed_reason">Усі %1$d конвертації не вдалися: %2$s</string>
     <string name="summary_partial">Конвертовано %1$d з %2$d (помилок: %3$d)</string>
+    <string name="encode_hevc_hw">Кодувати HEVC (%1$s)</string>
+    <string name="hw_quality_label">Якість: %1$d%% (CQ)</string>
+    <string name="hw_bitrate_label">Бітрейт: %1$s Мбіт/с</string>
+    <string name="mode_cbr">CBR</string>
+    <string name="mode_vbr">VBR</string>
+    <string name="result_bitrate_video">Відео: %1$s → %2$s</string>
+    <string name="result_bitrate_audio">Аудіо: %1$s → %2$s</string>
+    <string name="bitrate_mbps">%1$s Мбіт/с</string>
+    <string name="bitrate_kbps">%1$d кбіт/с</string>
+    <string name="bitrate_none">—</string>
+    <string name="replace_originals">Замінити оригінали</string>
+    <string name="replace_confirm_title_batch">Замінити оригінали?</string>
+    <string name="replace_confirm_message_batch">%1$d вихідних відео буде безповоротно видалено. Стиснуті версії залишаться у вашій бібліотеці. Цю дію не можна скасувати.</string>
+    <string name="replace_done_batch">Оригінали замінено</string>
 </resources>

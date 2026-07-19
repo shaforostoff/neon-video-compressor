@@ -100,4 +100,18 @@
     <string name="summary_all_failed">Alle %1$d Konvertierungen fehlgeschlagen</string>
     <string name="summary_all_failed_reason">Alle %1$d Konvertierungen fehlgeschlagen: %2$s</string>
     <string name="summary_partial">%1$d von %2$d konvertiert (%3$d fehlgeschlagen)</string>
+    <string name="encode_hevc_hw">HEVC (%1$s) kodieren</string>
+    <string name="hw_quality_label">Qualität: %1$d%% (CQ)</string>
+    <string name="hw_bitrate_label">Bitrate: %1$s Mbit/s</string>
+    <string name="mode_cbr">CBR</string>
+    <string name="mode_vbr">VBR</string>
+    <string name="result_bitrate_video">Video: %1$s → %2$s</string>
+    <string name="result_bitrate_audio">Audio: %1$s → %2$s</string>
+    <string name="bitrate_mbps">%1$s Mbit/s</string>
+    <string name="bitrate_kbps">%1$d kbit/s</string>
+    <string name="bitrate_none">—</string>
+    <string name="replace_originals">Originale ersetzen</string>
+    <string name="replace_confirm_title_batch">Originale ersetzen?</string>
+    <string name="replace_confirm_message_batch">%1$d Originalvideos werden endgültig gelöscht. Die komprimierten Versionen bleiben in deiner Mediathek. Das lässt sich nicht rückgängig machen.</string>
+    <string name="replace_done_batch">Originale ersetzt</string>
 </resources>

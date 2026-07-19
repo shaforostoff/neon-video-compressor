@@ -86,6 +86,10 @@ public class ConversionService extends Service implements ConversionJob.Listener
         // result UI offer to delete/replace the original.
         public Uri inputUri;
         public final ArrayList<Uri> outputs = new ArrayList<>(); // all successful outputs
+        // Parallel to outputs: the source each output was produced from, or null
+        // when it can't/shouldn't be replaced (a stopped-early partial output).
+        // Lets the result UI offer "Replace original(s)" for batches too.
+        public final ArrayList<Uri> outputSources = new ArrayList<>();
 
         /** Progress across the whole batch, factoring in completed files. */
         public float batchFraction() {
@@ -144,9 +148,12 @@ public class ConversionService extends Service implements ConversionJob.Listener
     private long totalBytes;        // size of produced outputs
     private long originalBytes;     // size of the sources that succeeded
     private long currentInputBytes; // size of the source currently being processed
+    private Uri currentInput;       // source uri currently being processed
     private long totalEncodeMediaUs; // source media encoded, across the batch (active time only)
     private long totalEncodeWallMs;  // wall-clock ms spent actively video-encoding, across the batch
     private final ArrayList<Uri> collectedOutputs = new ArrayList<>();
+    // Parallel to collectedOutputs: the source of each (null when not replaceable).
+    private final ArrayList<Uri> collectedOutputSources = new ArrayList<>();
 
     public class LocalBinder extends Binder {
         public ConversionService getService() {
@@ -314,6 +321,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
             snapshot.status = Status.RUNNING;
             snapshot.lowMemoryPaused = false;
             main.post(this::clearMemoryGuard); // drop any stale auto-resume from the previous file
+            currentInput = input;
             currentInputBytes = queryUriSize(input);
             pushUpdate(true);
 
@@ -372,6 +380,8 @@ public class ConversionService extends Service implements ConversionJob.Listener
         lastDisplayName = displayName;
         if (output != null) {
             collectedOutputs.add(output); // worker thread only
+            // A partial (stopped-early) output must never replace its original.
+            collectedOutputSources.add(partial ? null : currentInput);
             totalBytes += queryUriSize(output);
             originalBytes += currentInputBytes;
         }
@@ -460,6 +470,8 @@ public class ConversionService extends Service implements ConversionJob.Listener
         // copies it defensively on receipt.
         snapshot.outputs.clear();
         snapshot.outputs.addAll(collectedOutputs);
+        snapshot.outputSources.clear();
+        snapshot.outputSources.addAll(collectedOutputSources);
 
         lastTerminal = snapshot;
         // Durable copy so the finished screen (Open/Share/Replace) survives the

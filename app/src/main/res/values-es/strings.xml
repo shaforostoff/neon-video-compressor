@@ -100,4 +100,18 @@
     <string name="summary_all_failed">Fallaron las %1$d conversiones</string>
     <string name="summary_all_failed_reason">Fallaron las %1$d conversiones: %2$s</string>
     <string name="summary_partial">Convertidos %1$d de %2$d (%3$d fallidos)</string>
+    <string name="encode_hevc_hw">Codificar HEVC (%1$s)</string>
+    <string name="hw_quality_label">Calidad: %1$d%% (CQ)</string>
+    <string name="hw_bitrate_label">Tasa de bits: %1$s Mbps</string>
+    <string name="mode_cbr">CBR</string>
+    <string name="mode_vbr">VBR</string>
+    <string name="result_bitrate_video">Vídeo: %1$s → %2$s</string>
+    <string name="result_bitrate_audio">Audio: %1$s → %2$s</string>
+    <string name="bitrate_mbps">%1$s Mbps</string>
+    <string name="bitrate_kbps">%1$d kbps</string>
+    <string name="bitrate_none">—</string>
+    <string name="replace_originals">Reemplazar originales</string>
+    <string name="replace_confirm_title_batch">¿Reemplazar los originales?</string>
+    <string name="replace_confirm_message_batch">%1$d vídeos originales se eliminarán de forma permanente. Las versiones comprimidas se conservan en tu biblioteca. Esto no se puede deshacer.</string>
+    <string name="replace_done_batch">Originales reemplazados</string>
 </resources>

@@ -42,8 +42,12 @@
     <string name="stop_discard">Discard</string>
     <string name="stop_keep">Keep going</string>
     <string name="replace_original">Replace original</string>
+    <string name="replace_originals">Replace originals</string>
     <string name="replace_confirm_title">Replace the original?</string>
+    <string name="replace_confirm_title_batch">Replace the originals?</string>
     <string name="replace_confirm_message">%1$s will be permanently deleted. The compressed version stays in your library. This cannot be undone.</string>
+    <string name="replace_confirm_message_batch">%1$d original videos will be permanently deleted. The compressed versions stay in your library. This cannot be undone.</string>
+    <string name="replace_done_batch">Originals replaced</string>
     <string name="replace_this_video">The original video</string>
     <string name="replace_confirm_delete">Delete original</string>
     <string name="replace_done">Original replaced</string>
