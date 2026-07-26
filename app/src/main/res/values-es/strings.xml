@@ -43,8 +43,8 @@
     <string name="replace_failed">No se pudo eliminar el original</string>
     <string name="done">Hecho</string>
 
-    <string name="about">Acerca de</string>
-    <string name="about_title">Acerca de Neon Video Compressor</string>
+    <string name="about">Sobre esta aplicación</string>
+    <string name="about_title">Sobre Neon Video Compressor</string>
 
     <string name="close">Cerrar</string>
     <string name="preparing">Preparando…</string>
