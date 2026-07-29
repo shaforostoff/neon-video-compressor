@@ -52,7 +52,6 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_VIDEO_MODE = "video_mode_enum";
     private static final String KEY_CRF = "crf";
     private static final String KEY_HW_QUALITY = "hw_quality";
-    private static final String KEY_HW_BITRATE = "hw_bitrate_bps"; // legacy (pre-split) default
     private static final String KEY_HW_CBR_BITRATE = "hw_cbr_bitrate_bps";
     private static final String KEY_HW_VBR_BITRATE = "hw_vbr_bitrate_bps";
     private static final String KEY_HW_VBR = "hw_vbr";
@@ -63,6 +62,10 @@ public class MainActivity extends AppCompatActivity {
     private static final int HW_BITRATE_STEP_BPS = 100_000;       // 0.1 Mbps
     private static final int HW_BITRATE_MIN_BPS = 100_000;        // 0.1 Mbps
     private static final int HW_BITRATE_FALLBACK_MAX_BPS = 50_000_000; // 50 Mbps
+    // First-launch bitrates. VBR (the default rate control) treats its target as an
+    // average, so it lands far smaller than the same number under CBR.
+    private static final int DEFAULT_HW_VBR_BITRATE_BPS = 2_000_000; // 2000 kbps
+    private static final int DEFAULT_HW_CBR_BITRATE_BPS = 3_000_000; // 3000 kbps
     private static final String KEY_PRESET = "preset";
     private static final String KEY_AUDIO_MODE = "audio_mode";
     private static final String KEY_AUDIO_BITRATE = "audio_bitrate";
@@ -166,12 +169,11 @@ public class MainActivity extends AppCompatActivity {
         // Restore the last-used encoding settings (defaults on first launch).
         x265Crf = prefs.getInt(KEY_CRF, 30);
         hwQuality = prefs.getInt(KEY_HW_QUALITY, 60);
-        // CBR and VBR each remember their own bitrate; seed both from the legacy
-        // shared value so an existing install keeps its last setting.
-        int legacyBitrate = prefs.getInt(KEY_HW_BITRATE, 8_000_000);
-        hwCbrBitrateBps = prefs.getInt(KEY_HW_CBR_BITRATE, legacyBitrate);
-        hwVbrBitrateBps = prefs.getInt(KEY_HW_VBR_BITRATE, legacyBitrate);
-        hwVbr = prefs.getBoolean(KEY_HW_VBR, false);
+        // CBR and VBR each remember their own bitrate, so switching rate control
+        // doesn't drag the other mode's number along.
+        hwCbrBitrateBps = prefs.getInt(KEY_HW_CBR_BITRATE, DEFAULT_HW_CBR_BITRATE_BPS);
+        hwVbrBitrateBps = prefs.getInt(KEY_HW_VBR_BITRATE, DEFAULT_HW_VBR_BITRATE_BPS);
+        hwVbr = prefs.getBoolean(KEY_HW_VBR, true);
         bitrateModeGroup.check(hwVbr ? R.id.rbVbr : R.id.rbCbr);
         setupVideoModeSpinner();
         setupSpinner(spPreset, R.array.presets, prefs.getInt(KEY_PRESET, 6 /* slow */));
@@ -548,13 +550,23 @@ public class MainActivity extends AppCompatActivity {
         spVideoMode.setSelection(idx >= 0 ? idx : 0);
     }
 
-    private static Options.VideoMode parseMode(String name) {
-        if (name == null) return Options.VideoMode.ENCODE_HEVC;
+    private Options.VideoMode parseMode(String name) {
+        if (name == null) return defaultVideoMode();
         try {
             return Options.VideoMode.valueOf(name);
         } catch (IllegalArgumentException e) {
-            return Options.VideoMode.ENCODE_HEVC;
+            return defaultVideoMode();
         }
+    }
+
+    /**
+     * Hardware HEVC is the default on devices that have a HW encoder (much faster,
+     * far less battery); x265 only where there's none. Requires {@link #hwInfo} to
+     * have been detected, i.e. call it from {@link #setupVideoModeSpinner} onwards.
+     */
+    private Options.VideoMode defaultVideoMode() {
+        return hwInfo != null
+                ? Options.VideoMode.ENCODE_HEVC_HW : Options.VideoMode.ENCODE_HEVC;
     }
 
     private Options.VideoMode currentVideoMode() {

@@ -49,7 +49,7 @@ public class Options implements Serializable {
     public int hwBitrate = 8_000_000;
 
     /** Rate control for the hardware bitrate path (ignored when the encoder is CQ). */
-    public HwBitrateMode hwBitrateMode = HwBitrateMode.CBR;
+    public HwBitrateMode hwBitrateMode = HwBitrateMode.VBR;
 
     public AudioMode audioMode = AudioMode.ENCODE_AAC_LC;
     public int audioBitrate = 40_000; // bits per second
