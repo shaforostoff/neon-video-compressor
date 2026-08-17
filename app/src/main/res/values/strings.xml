@@ -5,6 +5,8 @@
     <string name="select_files">Select Files</string>
     <string name="videos_selected">%1$d videos selected</string>
     <string name="no_file_selected">No files selected</string>
+    <!-- Combined size of a multi-video selection; %1$s is e.g. "128 MB". -->
+    <string name="selection_total_size">Total: %1$s</string>
     <string name="video_settings">Video</string>
     <string name="audio_settings">Audio</string>
     <string name="preset">Preset</string>

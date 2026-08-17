@@ -42,6 +42,16 @@
             android:text="@string/no_file_selected"
             android:textStyle="italic" />
 
+        <!-- Size (plus bitrate, for a single video); filled in asynchronously. -->
+        <TextView
+            android:id="@+id/txtFileMeta"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textAppearance="?attr/textAppearanceBodySmall"
+            android:textColor="?attr/colorOnSurfaceVariant"
+            android:visibility="gone" />
+
         <!-- Video section -->
         <TextView
             android:layout_width="match_parent"

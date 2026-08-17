@@ -10,6 +10,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.text.format.Formatter;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.RadioGroup;
@@ -77,7 +78,7 @@ public class MainActivity extends AppCompatActivity {
 
     private final ArrayList<Uri> selectedUris = new ArrayList<>();
 
-    private TextView txtFile, txtCrf;
+    private TextView txtFile, txtFileMeta, txtCrf;
     private SeekBar seekCrf;
     private Spinner spVideoMode, spPreset, spAudioMode, spAudioBitrate;
     private View videoEncodeOptions, audioEncodeOptions, presetGroup;
@@ -105,6 +106,10 @@ public class MainActivity extends AppCompatActivity {
     // Bitrate (bits/sec) of the currently selected source, used to cap the slider
     // (0 = unknown, e.g. nothing selected yet -> fall back to the fixed ceiling).
     private int sourceBitrateBps;
+
+    // Bumped on every selection change, so a background size/bitrate probe that
+    // finishes after the user has picked again can tell its result is stale.
+    private int selectionToken;
 
     // Folder/document browser (any provider, any folder) — reliable for videos
     // tucked away outside the media gallery, but many providers don't actually
@@ -149,6 +154,7 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         txtFile = findViewById(R.id.txtFile);
+        txtFileMeta = findViewById(R.id.txtFileMeta);
         txtCrf = findViewById(R.id.txtCrf);
         seekCrf = findViewById(R.id.seekCrf);
         spVideoMode = findViewById(R.id.spVideoMode);
@@ -382,6 +388,45 @@ public class MainActivity extends AppCompatActivity {
         boolean any = !selectedUris.isEmpty();
         btnConvert.setEnabled(any);
         btnPreview.setEnabled(any);
+        probeSelectionMeta();
+    }
+
+    /**
+     * Fills in the size line under the filename (plus the bitrate when a single
+     * video is selected). Reading it costs a content query per Uri and, for one
+     * video, a {@link MediaMetadataRetriever} open, so it runs off the main
+     * thread; a result belonging to a superseded selection is dropped.
+     */
+    private void probeSelectionMeta() {
+        txtFileMeta.setVisibility(View.GONE);
+        if (selectedUris.isEmpty()) return;
+        final List<Uri> uris = new ArrayList<>(selectedUris);
+        final int token = ++selectionToken;
+        new Thread(() -> {
+            String meta = describeSize(uris);
+            runOnUiThread(() -> {
+                if (token != selectionToken || meta == null) return;
+                txtFileMeta.setText(meta);
+                txtFileMeta.setVisibility(View.VISIBLE);
+            });
+        }, "selection-meta").start();
+    }
+
+    /**
+     * @return "12.5 MB · 4.2 Mbps" for a single video, the combined size for
+     * several, or null when nothing could be determined.
+     */
+    private String describeSize(List<Uri> uris) {
+        long totalBytes = 0;
+        for (Uri uri : uris) totalBytes += SourceMetadata.querySize(this, uri);
+        String size = totalBytes > 0 ? Formatter.formatShortFileSize(this, totalBytes) : null;
+        if (uris.size() > 1) {
+            return size != null ? getString(R.string.selection_total_size, size) : null;
+        }
+        int bps = probeBitrate(uris.get(0));
+        String rate = bps > 0 ? Formats.bitrate(this, bps) : null;
+        if (size == null) return rate;
+        return rate != null ? size + " · " + rate : size;
     }
 
     private String describe(Uri uri) {

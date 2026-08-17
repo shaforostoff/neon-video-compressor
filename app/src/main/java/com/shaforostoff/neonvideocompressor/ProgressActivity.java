@@ -821,16 +821,7 @@ public class ProgressActivity extends AppCompatActivity {
     /** @return the formatted "Video/Audio: orig → new" line, or null if that track is absent in both. */
     private String bitrateLine(int fmtRes, long srcBps, long outBps) {
         if (srcBps < 0 && outBps < 0) return null;
-        return getString(fmtRes, formatBitrate(srcBps), formatBitrate(outBps));
-    }
-
-    private String formatBitrate(long bps) {
-        if (bps < 0) return getString(R.string.bitrate_none);
-        if (bps >= 1_000_000) {
-            return getString(R.string.bitrate_mbps,
-                    String.format(Locale.US, "%.1f", bps / 1_000_000.0));
-        }
-        return getString(R.string.bitrate_kbps, Math.round(bps / 1000.0));
+        return getString(fmtRes, Formats.bitrate(this, srcBps), Formats.bitrate(this, outBps));
     }
 
     /**

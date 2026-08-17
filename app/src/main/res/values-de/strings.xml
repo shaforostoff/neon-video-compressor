@@ -5,6 +5,7 @@
     <string name="select_files">Dateien auswählen</string>
     <string name="videos_selected">%1$d Videos ausgewählt</string>
     <string name="no_file_selected">Keine Dateien ausgewählt</string>
+    <string name="selection_total_size">Gesamt: %1$s</string>
     <string name="video_settings">Video</string>
     <string name="audio_settings">Audio</string>
     <string name="preset">Voreinstellung</string>

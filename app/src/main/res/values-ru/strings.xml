@@ -5,6 +5,7 @@
     <string name="select_files">Выбрать файлы</string>
     <string name="videos_selected">Выбрано видео: %1$d</string>
     <string name="no_file_selected">Файлы не выбраны</string>
+    <string name="selection_total_size">Всего: %1$s</string>
     <string name="video_settings">Видео</string>
     <string name="audio_settings">Аудио</string>
     <string name="preset">Пресет</string>
