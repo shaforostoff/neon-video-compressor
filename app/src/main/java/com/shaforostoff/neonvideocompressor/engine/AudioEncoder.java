@@ -27,6 +27,17 @@ public final class AudioEncoder {
 
     private static final long TIMEOUT_US = 10_000;
 
+    /**
+     * Cap on decoded-PCM chunks waiting for the encoder. Without it the queue is
+     * unbounded by construction: the decoder is drained every iteration while the
+     * encoder only takes what its (few) input buffers can hold, so a slow encoder
+     * makes the backlog — and the {@code byte[]} per chunk — grow for the whole
+     * track. At 48 kHz stereo 16-bit that is ~192 KB of PCM per second of audio.
+     * Holding off on the decoder instead back-pressures it through its own output
+     * buffers, which is exactly the flow control we want.
+     */
+    private static final int MAX_PENDING_CHUNKS = 32;
+
     private static final class Chunk {
         final byte[] data;
         final long pts;
@@ -126,8 +137,8 @@ public final class AudioEncoder {
                     }
                 }
 
-                // 2) decoder output -> pending PCM queue
-                if (!decoderDone) {
+                // 2) decoder output -> pending PCM queue (only while it has room)
+                if (!decoderDone && pending.size() < MAX_PENDING_CHUNKS) {
                     int outIndex = decoder.dequeueOutputBuffer(decInfo, TIMEOUT_US);
                     if (outIndex >= 0) {
                         boolean eos = (decInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
