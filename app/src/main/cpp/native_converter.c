@@ -612,38 +612,67 @@ static AVCodecContext *open_hevc_encoder(const AVCodec *encoder, AVCodecContext 
 }
 
 // ---------------------------------------------------------------------------
-// nativeTranscodeVideo
+// Shared transcode core
+//
+// Both public transcode entry points are the same pipeline — decode the source
+// video, encode HEVC with libx265, mux the result — differing only in where the
+// output goes and what else rides along:
+//
+//   nativeTranscodeVideo: video-only, out to a plain cache path, may stop at a
+//                         preview window (maxDurationUs).
+//   nativeTranscodeMux:   out straight to a caller-owned seekable fd (the
+//                         MediaStore item) with +faststart, interleaving an
+//                         already-encoded audio track, and able to finalize a
+//                         partial file on a graceful stop.
+//
+// Those differences are carried in a TranscodeSpec so the ~180 lines of shared
+// setup, encode loop, pause teardown/rebuild and cleanup exist once.
 // ---------------------------------------------------------------------------
-JNIEXPORT jint JNICALL
-Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscodeVideo(
-        JNIEnv *env, jclass clazz, jint inFd, jstring joutPath,
-        jint crf, jstring jpreset, jlong ctrlHandle, jlong maxDurationUs, jobject cb) {
 
-    Control *ctrl = (Control *) (intptr_t) ctrlHandle;
-    const char *outPath = (*env)->GetStringUTFChars(env, joutPath, NULL);
-    const char *preset = (*env)->GetStringUTFChars(env, jpreset, NULL);
+// Where a transcode writes its output: a filesystem path, or a caller-owned fd.
+typedef struct {
+    const char *path;  // used when fd < 0
+    int fd;            // >= 0: mux straight into this fd (adds +faststart)
+} TranscodeSink;
 
-    jmethodID onProg = NULL;
-    if (cb) {
-        jclass cbCls = (*env)->GetObjectClass(env, cb);
-        onProg = (*env)->GetMethodID(env, cbCls, "onProgress", "(J)V");
-    }
+typedef struct {
+    int inFd;
+    int audioFd;            // -1: no audio track to interleave
+    TranscodeSink sink;
+    int crf;
+    const char *preset;
+    Control *ctrl;
+    int64_t maxDurationUs;  // 0: encode the whole file
+    int allowStop;          // honour ctrl->stop and finalize what was encoded
+    const char *tag;        // log prefix
+} TranscodeSpec;
+
+// Returns RET_OK / RET_STOPPED / RET_CANCELLED / RET_ERROR.
+static int transcode_core(JNIEnv *env, const TranscodeSpec *spec,
+                          jobject cb, jmethodID onProg) {
+    Control *ctrl = spec->ctrl;
+    const char *tag = spec->tag;
+    const int useFd = spec->sink.fd >= 0;
 
     AVFormatContext *ifmt = NULL, *ofmt = NULL;
     FdSource *inSrc = NULL;
+    FdSource out = {0};
+    out.fd = spec->sink.fd;
+    CopySource a = {0};
+    int have_audio = (spec->audioFd >= 0);
     AVCodecContext *dec = NULL, *enc = NULL;
     struct SwsContext *sws = NULL;
     AVFrame *frame = NULL, *swsFrame = NULL;
     AVPacket *pkt = NULL, *opkt = NULL;
     int ret = RET_ERROR;
-    int header_written = 0;
+    int stopped = 0;
 
-    ifmt = fd_open_input(inFd, ctrl, &inSrc);
-    if (!ifmt) { LOGE("open input failed"); goto end; }
+    ifmt = fd_open_input(spec->inFd, ctrl, &inSrc);
+    if (!ifmt) { LOGE("%s: open input failed", tag); goto end; }
     if (avformat_find_stream_info(ifmt, NULL) < 0) goto end;
 
     int vstream = av_find_best_stream(ifmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-    if (vstream < 0) { LOGE("no video stream"); goto end; }
+    if (vstream < 0) { LOGE("%s: no video stream", tag); goto end; }
     AVStream *ist = ifmt->streams[vstream];
 
     const AVCodec *decoder = avcodec_find_decoder(ist->codecpar->codec_id);
@@ -652,16 +681,30 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscode
     if (!dec) goto end;
     avcodec_parameters_to_context(dec, ist->codecpar);
     dec->pkt_timebase = ist->time_base;
-    LOGI("transcode: src codec=%s pix_fmt=%d %dx%d",
-         decoder->name, dec->pix_fmt, dec->width, dec->height);
-    if (avcodec_open2(dec, decoder, NULL) < 0) { LOGE("decoder open failed"); goto end; }
+    LOGI("%s: src codec=%s pix_fmt=%d %dx%d",
+         tag, decoder->name, dec->pix_fmt, dec->width, dec->height);
+    if (avcodec_open2(dec, decoder, NULL) < 0) { LOGE("%s: decoder open failed", tag); goto end; }
 
     const AVCodec *encoder = avcodec_find_encoder_by_name("libx265");
     if (!encoder) { LOGE("libx265 not found"); goto end; }
-    enc = open_hevc_encoder(encoder, dec, ifmt, ist, preset, (int) crf);
-    if (!enc) { LOGE("x265 open failed"); goto end; }
+    enc = open_hevc_encoder(encoder, dec, ifmt, ist, spec->preset, spec->crf);
+    if (!enc) { LOGE("%s: x265 open failed", tag); goto end; }
 
-    if (avformat_alloc_output_context2(&ofmt, NULL, NULL, outPath) < 0 || !ofmt) goto end;
+    if (have_audio && src_open(&a, spec->audioFd, AVMEDIA_TYPE_AUDIO) < 0) {
+        // No usable audio: continue video-only (mirrors nativeRemux).
+        src_close(&a);
+        memset(&a, 0, sizeof(a));
+        have_audio = 0;
+    }
+
+    // With an fd sink there is no path to guess a muxer from, so mp4 is forced
+    // (the dummy filename only sets ofmt->url, which our io_open ignores).
+    if (useFd) {
+        if (avformat_alloc_output_context2(&ofmt, NULL, "mp4", "output.mp4") < 0 || !ofmt) goto end;
+    } else {
+        if (avformat_alloc_output_context2(&ofmt, NULL, NULL, spec->sink.path) < 0 || !ofmt) goto end;
+    }
+
     AVStream *ost = avformat_new_stream(ofmt, NULL);
     if (!ost) goto end;
     avcodec_parameters_from_context(ost->codecpar, enc);
@@ -669,13 +712,47 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscode
     ost->time_base = enc->time_base;
     copy_display_matrix(ist, ost);
 
-    if (!(ofmt->oformat->flags & AVFMT_NOFILE)) {
-        if (avio_open(&ofmt->pb, outPath, AVIO_FLAG_WRITE) < 0) { LOGE("avio_open out failed"); goto end; }
+    if (have_audio) {
+        a.out = avformat_new_stream(ofmt, NULL);
+        if (!a.out) goto end;
+        avcodec_parameters_copy(a.out->codecpar, a.fmt->streams[a.stream_index]->codecpar);
+        a.out->codecpar->codec_tag = 0;
+        a.out->time_base = a.fmt->streams[a.stream_index]->time_base;
     }
-    int wh = avformat_write_header(ofmt, NULL);
-    if (wh < 0) { LOGE("write_header failed: %s", av_err2str(wh)); goto end; }
-    header_written = 1;
-    LOGI("transcode: header written, entering encode loop");
+
+    if (useFd) {
+        // Custom write AVIO over the output fd (see nativeRemux for the details
+        // of the seekability and +faststart io_open arrangement).
+        uint8_t *wbuf = av_malloc(1 << 16);
+        if (!wbuf) goto end;
+        out.avio = avio_alloc_context(wbuf, 1 << 16, 1 /* write */, &out,
+                                      NULL, fdsink_write, fdsrc_seek);
+        if (!out.avio) { av_free(wbuf); goto end; }
+        ofmt->pb = out.avio;
+        ofmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+        ofmt->io_open = fd_io_open;
+        ofmt->io_close2 = fd_io_close2;
+        ofmt->opaque = (void *) (intptr_t) spec->sink.fd;
+    } else if (!(ofmt->oformat->flags & AVFMT_NOFILE)) {
+        if (avio_open(&ofmt->pb, spec->sink.path, AVIO_FLAG_WRITE) < 0) {
+            LOGE("%s: avio_open out failed", tag);
+            goto end;
+        }
+    }
+
+    {
+        AVDictionary *opts = NULL;
+        // +faststart matters for the user-visible output; a preview clip written
+        // to the cache is played locally straight afterwards.
+        if (useFd) av_dict_set(&opts, "movflags", "+faststart", 0);
+        int wh = avformat_write_header(ofmt, &opts);
+        av_dict_free(&opts);
+        if (wh < 0) { LOGE("%s: write_header failed: %s", tag, av_err2str(wh)); goto end; }
+    }
+    LOGI("%s: header written, entering encode loop (audio=%d)", tag, have_audio);
+
+    if (have_audio) src_next(&a);
+    CopySource *audio = have_audio ? &a : NULL;
 
     frame = av_frame_alloc();
     pkt = av_packet_alloc();
@@ -684,6 +761,7 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscode
 
     int64_t lastPts = INT64_MIN;
     int64_t lastDtsOut = AV_NOPTS_VALUE;
+    int64_t maxVideoUs = INT64_MIN; // INT64_MIN == no video packet written yet
 
     while (1) {
         // Pause handling. Rather than block with the encoder alive — which would
@@ -693,32 +771,37 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscode
         // stay open, so we keep our exact stream position; on resume we rebuild the
         // encoder, whose first frame is a fresh IDR that splices onto the stream.
         if (ctrl) {
+            int wantStop;
             pthread_mutex_lock(&ctrl->mutex);
-            int wantPause = ctrl->paused && !ctrl->cancel;
+            wantStop = spec->allowStop && ctrl->stop;
+            int wantPause = ctrl->paused && !ctrl->cancel && !wantStop;
             pthread_mutex_unlock(&ctrl->mutex);
             if (wantPause) {
                 avcodec_send_frame(enc, NULL);
-                if (drain_encoder(enc, ofmt, ost, opkt, &lastDtsOut, NULL, NULL) < 0) {
-                    LOGE("drain before pause failed"); ret = RET_ERROR; goto end;
+                if (drain_encoder(enc, ofmt, ost, opkt, &lastDtsOut, audio, &maxVideoUs) < 0) {
+                    LOGE("%s: drain before pause failed", tag); ret = RET_ERROR; goto end;
                 }
                 avcodec_free_context(&enc);
                 if (sws) { sws_freeContext(sws); sws = NULL; }
                 if (swsFrame) av_frame_free(&swsFrame);
-                LOGI("paused: encoder torn down, RAM released");
+                LOGI("%s paused: encoder torn down, RAM released", tag);
 
                 pthread_mutex_lock(&ctrl->mutex);
-                while (ctrl->paused && !ctrl->cancel) {
+                while (ctrl->paused && !ctrl->cancel && !(spec->allowStop && ctrl->stop)) {
                     pthread_cond_wait(&ctrl->cond, &ctrl->mutex);
                 }
                 int cancelled = ctrl->cancel;
+                wantStop = spec->allowStop && ctrl->stop;
                 pthread_mutex_unlock(&ctrl->mutex);
                 if (cancelled) { ret = RET_CANCELLED; goto end; }
+                if (wantStop) { stopped = 1; break; }
 
-                enc = open_hevc_encoder(encoder, dec, ifmt, ist, preset, (int) crf);
-                if (!enc) { LOGE("re-open x265 after pause failed"); ret = RET_ERROR; goto end; }
-                LOGI("resumed: encoder rebuilt");
+                enc = open_hevc_encoder(encoder, dec, ifmt, ist, spec->preset, spec->crf);
+                if (!enc) { LOGE("%s: re-open x265 after pause failed", tag); ret = RET_ERROR; goto end; }
+                LOGI("%s resumed: encoder rebuilt", tag);
             }
             if (ctrl->cancel) { ret = RET_CANCELLED; goto end; }
+            if (spec->allowStop && ctrl->stop) { stopped = 1; break; }
         }
 
         int r = av_read_frame(ifmt, pkt);
@@ -726,11 +809,11 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscode
         if (pkt->stream_index == vstream) {
             r = avcodec_send_packet(dec, pkt);
             av_packet_unref(pkt);
-            if (r < 0) { LOGE("send_packet failed: %s", av_err2str(r)); ret = RET_ERROR; goto end; }
+            if (r < 0) { LOGE("%s: send_packet failed: %s", tag, av_err2str(r)); ret = RET_ERROR; goto end; }
             r = pump_decoder(env, dec, enc, ofmt, ost, ist, frame, opkt,
-                             &sws, &swsFrame, &lastPts, &lastDtsOut, maxDurationUs,
-                             NULL, NULL, cb, onProg);
-            if (r < 0) { LOGE("pump_decoder failed: %s", av_err2str(r)); ret = RET_ERROR; goto end; }
+                             &sws, &swsFrame, &lastPts, &lastDtsOut, spec->maxDurationUs,
+                             audio, &maxVideoUs, cb, onProg);
+            if (r < 0) { LOGE("%s: pump_decoder failed: %s", tag, av_err2str(r)); ret = RET_ERROR; goto end; }
             if (r == 1) break; // reached the requested preview window
         } else {
             av_packet_unref(pkt);
@@ -739,20 +822,36 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscode
 
     if (check_control(ctrl)) { ret = RET_CANCELLED; goto end; }
 
-    // Flush decoder, then encoder.
-    avcodec_send_packet(dec, NULL);
-    pump_decoder(env, dec, enc, ofmt, ost, ist, frame, opkt, &sws, &swsFrame,
-                 &lastPts, &lastDtsOut, maxDurationUs, NULL, NULL, cb, onProg);
-    avcodec_send_frame(enc, NULL);
-    drain_encoder(enc, ofmt, ost, opkt, &lastDtsOut, NULL, NULL);
+    // Flush decoder, then encoder. On a stop the encoder may already be freed
+    // (stop arrived while paused); everything encoded so far is in the muxer.
+    if (enc) {
+        avcodec_send_packet(dec, NULL);
+        pump_decoder(env, dec, enc, ofmt, ost, ist, frame, opkt, &sws, &swsFrame,
+                     &lastPts, &lastDtsOut, spec->maxDurationUs, audio, &maxVideoUs, cb, onProg);
+        avcodec_send_frame(enc, NULL);
+        drain_encoder(enc, ofmt, ost, opkt, &lastDtsOut, audio, &maxVideoUs);
+    }
+
+    if (stopped && maxVideoUs == INT64_MIN) {
+        // Stopped before a single video packet was written: nothing to save.
+        ret = RET_CANCELLED;
+        goto end;
+    }
+
+    // Remaining audio: everything on a normal finish, or only up to the last
+    // video timestamp when stopped early (so the partial file's tracks match).
+    if (audio) {
+        if (src_write_upto(audio, ofmt, stopped ? maxVideoUs : INT64_MAX) < 0) {
+            LOGE("%s: audio tail write failed", tag);
+            goto end;
+        }
+    }
 
     if (av_write_trailer(ofmt) < 0) goto end;
-    ret = RET_OK;
+    ret = stopped ? RET_STOPPED : RET_OK;
+    LOGI("%s: done ret=%d maxVideoUs=%lld", tag, ret, (long long) maxVideoUs);
 
 end:
-    if (header_written && ret != RET_OK && ofmt) {
-        // best-effort: leave file for Java to delete
-    }
     if (sws) sws_freeContext(sws);
     if (swsFrame) av_frame_free(&swsFrame);
     if (frame) av_frame_free(&frame);
@@ -761,10 +860,59 @@ end:
     if (dec) avcodec_free_context(&dec);
     if (enc) avcodec_free_context(&enc);
     if (ofmt) {
-        if (ofmt->pb && !(ofmt->oformat->flags & AVFMT_NOFILE)) avio_closep(&ofmt->pb);
+        // An fd sink is AVFMT_FLAG_CUSTOM_IO, so its AVIO is ours to free below;
+        // a path sink's was opened by avio_open and must be closed here.
+        if (!useFd && ofmt->pb && !(ofmt->oformat->flags & AVFMT_NOFILE)) {
+            avio_closep(&ofmt->pb);
+        }
         avformat_free_context(ofmt);
     }
+    if (out.avio) {
+        av_freep(&out.avio->buffer);
+        avio_context_free(&out.avio);
+    }
+    if (have_audio) src_close(&a);
     fd_close_input(&ifmt, inSrc);
+    return ret;
+}
+
+// Resolves the ProgressCallback's onProgress(long) once per call. The method is
+// looked up on the callback's runtime class, so R8 must not rename it (see
+// proguard-rules.pro).
+static jmethodID progress_method(JNIEnv *env, jobject cb) {
+    if (!cb) return NULL;
+    jclass cbCls = (*env)->GetObjectClass(env, cb);
+    return (*env)->GetMethodID(env, cbCls, "onProgress", "(J)V");
+}
+
+// ---------------------------------------------------------------------------
+// nativeTranscodeVideo: decode inFd's video -> encode HEVC (libx265) into a
+// video-only mp4 at outPath with the hvc1 tag. Stops after maxDurationUs of
+// source video when that is non-zero (the preview window).
+// ---------------------------------------------------------------------------
+JNIEXPORT jint JNICALL
+Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscodeVideo(
+        JNIEnv *env, jclass clazz, jint inFd, jstring joutPath,
+        jint crf, jstring jpreset, jlong ctrlHandle, jlong maxDurationUs, jobject cb) {
+
+    const char *outPath = (*env)->GetStringUTFChars(env, joutPath, NULL);
+    const char *preset = (*env)->GetStringUTFChars(env, jpreset, NULL);
+
+    TranscodeSpec spec = {
+            .inFd = inFd,
+            .audioFd = -1,
+            .sink = {.path = outPath, .fd = -1},
+            .crf = (int) crf,
+            .preset = preset,
+            .ctrl = (Control *) (intptr_t) ctrlHandle,
+            .maxDurationUs = maxDurationUs,
+            // Preview clips are discarded on cancel; there is no partial file
+            // worth finalizing, so a stop request is left to the pause/cancel path.
+            .allowStop = 0,
+            .tag = "transcode",
+    };
+    int ret = transcode_core(env, &spec, cb, progress_method(env, cb));
+
     (*env)->ReleaseStringUTFChars(env, joutPath, outPath);
     (*env)->ReleaseStringUTFChars(env, jpreset, preset);
     return ret;
@@ -787,208 +935,21 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeTranscode
         JNIEnv *env, jclass clazz, jint inFd, jint audioFd, jint outFd,
         jint crf, jstring jpreset, jlong ctrlHandle, jobject cb) {
 
-    Control *ctrl = (Control *) (intptr_t) ctrlHandle;
     const char *preset = (*env)->GetStringUTFChars(env, jpreset, NULL);
 
-    jmethodID onProg = NULL;
-    if (cb) {
-        jclass cbCls = (*env)->GetObjectClass(env, cb);
-        onProg = (*env)->GetMethodID(env, cbCls, "onProgress", "(J)V");
-    }
+    TranscodeSpec spec = {
+            .inFd = inFd,
+            .audioFd = audioFd,
+            .sink = {.path = NULL, .fd = outFd},
+            .crf = (int) crf,
+            .preset = preset,
+            .ctrl = (Control *) (intptr_t) ctrlHandle,
+            .maxDurationUs = 0,
+            .allowStop = 1,
+            .tag = "txmux",
+    };
+    int ret = transcode_core(env, &spec, cb, progress_method(env, cb));
 
-    AVFormatContext *ifmt = NULL, *ofmt = NULL;
-    FdSource *inSrc = NULL;
-    FdSource out = {0};
-    out.fd = outFd;
-    CopySource a = {0};
-    int have_audio = (audioFd >= 0);
-    AVCodecContext *dec = NULL, *enc = NULL;
-    struct SwsContext *sws = NULL;
-    AVFrame *frame = NULL, *swsFrame = NULL;
-    AVPacket *pkt = NULL, *opkt = NULL;
-    int ret = RET_ERROR;
-    int stopped = 0;
-
-    ifmt = fd_open_input(inFd, ctrl, &inSrc);
-    if (!ifmt) { LOGE("txmux: open input failed"); goto end; }
-    if (avformat_find_stream_info(ifmt, NULL) < 0) goto end;
-
-    int vstream = av_find_best_stream(ifmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-    if (vstream < 0) { LOGE("txmux: no video stream"); goto end; }
-    AVStream *ist = ifmt->streams[vstream];
-
-    const AVCodec *decoder = avcodec_find_decoder(ist->codecpar->codec_id);
-    if (!decoder) goto end;
-    dec = avcodec_alloc_context3(decoder);
-    if (!dec) goto end;
-    avcodec_parameters_to_context(dec, ist->codecpar);
-    dec->pkt_timebase = ist->time_base;
-    if (avcodec_open2(dec, decoder, NULL) < 0) { LOGE("txmux: decoder open failed"); goto end; }
-
-    const AVCodec *encoder = avcodec_find_encoder_by_name("libx265");
-    if (!encoder) { LOGE("libx265 not found"); goto end; }
-    enc = open_hevc_encoder(encoder, dec, ifmt, ist, preset, (int) crf);
-    if (!enc) { LOGE("txmux: x265 open failed"); goto end; }
-
-    if (have_audio && src_open(&a, audioFd, AVMEDIA_TYPE_AUDIO) < 0) {
-        // No usable audio: continue video-only (mirrors nativeRemux).
-        src_close(&a);
-        memset(&a, 0, sizeof(a));
-        have_audio = 0;
-    }
-
-    // No path to guess a muxer from; mp4 it is (the dummy filename only sets
-    // ofmt->url, which our io_open ignores).
-    if (avformat_alloc_output_context2(&ofmt, NULL, "mp4", "output.mp4") < 0 || !ofmt) goto end;
-
-    AVStream *ost = avformat_new_stream(ofmt, NULL);
-    if (!ost) goto end;
-    avcodec_parameters_from_context(ost->codecpar, enc);
-    ost->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
-    ost->time_base = enc->time_base;
-    copy_display_matrix(ist, ost);
-
-    if (have_audio) {
-        a.out = avformat_new_stream(ofmt, NULL);
-        if (!a.out) goto end;
-        avcodec_parameters_copy(a.out->codecpar, a.fmt->streams[a.stream_index]->codecpar);
-        a.out->codecpar->codec_tag = 0;
-        a.out->time_base = a.fmt->streams[a.stream_index]->time_base;
-    }
-
-    // Custom write AVIO over the output fd (see nativeRemux for the details of
-    // the seekability and +faststart io_open arrangement).
-    {
-        uint8_t *wbuf = av_malloc(1 << 16);
-        if (!wbuf) goto end;
-        out.avio = avio_alloc_context(wbuf, 1 << 16, 1 /* write */, &out,
-                                      NULL, fdsink_write, fdsrc_seek);
-        if (!out.avio) { av_free(wbuf); goto end; }
-        ofmt->pb = out.avio;
-        ofmt->flags |= AVFMT_FLAG_CUSTOM_IO;
-        ofmt->io_open = fd_io_open;
-        ofmt->io_close2 = fd_io_close2;
-        ofmt->opaque = (void *) (intptr_t) outFd;
-    }
-
-    {
-        AVDictionary *opts = NULL;
-        av_dict_set(&opts, "movflags", "+faststart", 0);
-        int wh = avformat_write_header(ofmt, &opts);
-        av_dict_free(&opts);
-        if (wh < 0) { LOGE("txmux: write_header failed: %s", av_err2str(wh)); goto end; }
-    }
-    LOGI("txmux: header written, entering encode loop (audio=%d)", have_audio);
-
-    if (have_audio) src_next(&a);
-    CopySource *audio = have_audio ? &a : NULL;
-
-    frame = av_frame_alloc();
-    pkt = av_packet_alloc();
-    opkt = av_packet_alloc();
-    if (!frame || !pkt || !opkt) goto end;
-
-    int64_t lastPts = INT64_MIN;
-    int64_t lastDtsOut = AV_NOPTS_VALUE;
-    int64_t maxVideoUs = INT64_MIN; // INT64_MIN == no video packet written yet
-
-    while (1) {
-        // Pause handling: flush and free the encoder to release its RAM while
-        // idle, rebuild on resume (see nativeTranscodeVideo for the rationale).
-        if (ctrl) {
-            pthread_mutex_lock(&ctrl->mutex);
-            int wantPause = ctrl->paused && !ctrl->cancel && !ctrl->stop;
-            pthread_mutex_unlock(&ctrl->mutex);
-            if (wantPause) {
-                avcodec_send_frame(enc, NULL);
-                if (drain_encoder(enc, ofmt, ost, opkt, &lastDtsOut, audio, &maxVideoUs) < 0) {
-                    LOGE("txmux: drain before pause failed"); ret = RET_ERROR; goto end;
-                }
-                avcodec_free_context(&enc);
-                if (sws) { sws_freeContext(sws); sws = NULL; }
-                if (swsFrame) av_frame_free(&swsFrame);
-                LOGI("txmux paused: encoder torn down, RAM released");
-
-                pthread_mutex_lock(&ctrl->mutex);
-                while (ctrl->paused && !ctrl->cancel && !ctrl->stop) {
-                    pthread_cond_wait(&ctrl->cond, &ctrl->mutex);
-                }
-                int cancelled = ctrl->cancel;
-                pthread_mutex_unlock(&ctrl->mutex);
-                if (cancelled) { ret = RET_CANCELLED; goto end; }
-                if (ctrl->stop) { stopped = 1; break; }
-
-                enc = open_hevc_encoder(encoder, dec, ifmt, ist, preset, (int) crf);
-                if (!enc) { LOGE("txmux: re-open x265 after pause failed"); ret = RET_ERROR; goto end; }
-                LOGI("txmux resumed: encoder rebuilt");
-            }
-            if (ctrl->cancel) { ret = RET_CANCELLED; goto end; }
-            if (ctrl->stop) { stopped = 1; break; }
-        }
-
-        int r = av_read_frame(ifmt, pkt);
-        if (r < 0) break; // EOF or interrupted
-        if (pkt->stream_index == vstream) {
-            r = avcodec_send_packet(dec, pkt);
-            av_packet_unref(pkt);
-            if (r < 0) { LOGE("txmux: send_packet failed: %s", av_err2str(r)); ret = RET_ERROR; goto end; }
-            r = pump_decoder(env, dec, enc, ofmt, ost, ist, frame, opkt,
-                             &sws, &swsFrame, &lastPts, &lastDtsOut, 0,
-                             audio, &maxVideoUs, cb, onProg);
-            if (r < 0) { LOGE("txmux: pump_decoder failed: %s", av_err2str(r)); ret = RET_ERROR; goto end; }
-        } else {
-            av_packet_unref(pkt);
-        }
-    }
-
-    if (check_control(ctrl)) { ret = RET_CANCELLED; goto end; }
-
-    // Flush decoder, then encoder. On a stop the encoder may already be freed
-    // (stop arrived while paused); everything encoded so far is in the muxer.
-    if (enc) {
-        avcodec_send_packet(dec, NULL);
-        pump_decoder(env, dec, enc, ofmt, ost, ist, frame, opkt, &sws, &swsFrame,
-                     &lastPts, &lastDtsOut, 0, audio, &maxVideoUs, cb, onProg);
-        avcodec_send_frame(enc, NULL);
-        drain_encoder(enc, ofmt, ost, opkt, &lastDtsOut, audio, &maxVideoUs);
-    }
-
-    if (stopped && maxVideoUs == INT64_MIN) {
-        // Stopped before a single video packet was written: nothing to save.
-        ret = RET_CANCELLED;
-        goto end;
-    }
-
-    // Remaining audio: everything on a normal finish, or only up to the last
-    // video timestamp when stopped early (so the partial file's tracks match).
-    if (audio) {
-        if (src_write_upto(audio, ofmt, stopped ? maxVideoUs : INT64_MAX) < 0) {
-            LOGE("txmux: audio tail write failed");
-            goto end;
-        }
-    }
-
-    if (av_write_trailer(ofmt) < 0) goto end;
-    ret = stopped ? RET_STOPPED : RET_OK;
-    LOGI("txmux: done ret=%d maxVideoUs=%lld", ret, (long long) maxVideoUs);
-
-end:
-    if (sws) sws_freeContext(sws);
-    if (swsFrame) av_frame_free(&swsFrame);
-    if (frame) av_frame_free(&frame);
-    if (pkt) av_packet_free(&pkt);
-    if (opkt) av_packet_free(&opkt);
-    if (dec) avcodec_free_context(&dec);
-    if (enc) avcodec_free_context(&enc);
-    if (ofmt) {
-        avformat_free_context(ofmt); // AVFMT_FLAG_CUSTOM_IO: leaves out.avio to us
-    }
-    if (out.avio) {
-        av_freep(&out.avio->buffer);
-        avio_context_free(&out.avio);
-    }
-    if (have_audio) src_close(&a);
-    fd_close_input(&ifmt, inSrc);
     (*env)->ReleaseStringUTFChars(env, jpreset, preset);
     return ret;
 }
