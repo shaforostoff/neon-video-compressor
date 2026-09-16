@@ -51,11 +51,23 @@ public class ConversionJob {
     // weights for overall progress
     private float wVideo, wAudio, wMux;
 
+    /**
+     * Minimum gap between progress updates handed to the listener. The native
+     * encoder calls back once per decoded frame, and every one of those used to
+     * cost an fstat on the live output fd, a Handler post to the main thread and
+     * a full re-render of the progress screen — tens of thousands of them over a
+     * long encode, all stealing CPU from the encoder itself. Two updates a second
+     * is well past what the eye reads off a progress bar.
+     */
+    private static final long PROGRESS_INTERVAL_MS = 500;
+
     // speed tracking (within the current pass)
     private Phase currentPhase = Phase.PROBING;
     private long lastUpdateMs = 0;
     private long lastProcessedUs = 0;
     private double speed = 0;
+    // Throttle clock for listener updates only — never for the bookkeeping above.
+    private long lastReportMs = 0;
 
     // Cumulative active (pause-excluded) video-encode time, for an accurate
     // average realtime ratio once the job finishes — unlike the smoothed
@@ -308,6 +320,7 @@ public class ConversionJob {
         lastUpdateMs = 0;
         lastProcessedUs = 0;
         speed = 0;
+        lastReportMs = 0; // a phase change always renders, and re-opens the window
         float base;
         switch (phase) {
             case AUDIO:
@@ -344,6 +357,12 @@ public class ConversionJob {
         }
         lastUpdateMs = nowMs;
         lastProcessedUs = processedUs;
+
+        // Everything above runs per frame — the smoothed speed and the active-time
+        // totals behind "Avg speed: N× realtime" would be wrong if sampled coarsely.
+        // Only the (expensive) trip out to the listener is rate-limited.
+        if (nowMs - lastReportMs < PROGRESS_INTERVAL_MS) return;
+        lastReportMs = nowMs;
 
         float frac = Math.max(0f, Math.min(1f, (float) processedUs / (float) durationUs));
         float base = phase == Phase.VIDEO ? wAudio : 0f;
