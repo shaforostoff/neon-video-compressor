@@ -689,13 +689,11 @@ public class ConversionService extends Service implements ConversionJob.Listener
     }
 
     private void startForegroundCompat(Notification n) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING);
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
-        } else {
-            startForeground(NOTIF_ID, n);
-        }
+        // minSdk is 29 (== Q), so a typed foreground service is always available.
+        startForeground(NOTIF_ID, n,
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
+                        ? ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
+                        : ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
     }
 
     private long queryUriSize(Uri uri) {

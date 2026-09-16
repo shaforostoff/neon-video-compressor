@@ -964,7 +964,6 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeRemux(
         jint outFd, jboolean videoWasEncoded) {
 
     int ret = RET_ERROR;
-    int header_written = 0;
     int have_video = (videoFd >= 0);
     int have_audio = (audioFd >= 0);
 
@@ -1039,7 +1038,6 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeRemux(
         goto end;
     }
     av_dict_free(&opts);
-    header_written = 1;
 
     // Prime both sources, then merge by DTS.
     if (have_video) src_next(&v);
