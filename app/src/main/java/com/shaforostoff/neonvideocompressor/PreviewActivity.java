@@ -21,6 +21,7 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.IntentCompat;
 
 import com.shaforostoff.neonvideocompressor.engine.HardwareVideoEncoder;
 import com.shaforostoff.neonvideocompressor.engine.JobControl;
@@ -111,7 +112,7 @@ public class PreviewActivity extends AppCompatActivity {
         setContentView(R.layout.activity_preview);
 
         inputUri = getIntent().getParcelableExtra(EXTRA_URI);
-        options = (Options) getIntent().getSerializableExtra(EXTRA_OPTIONS);
+        options = IntentCompat.getParcelableExtra(getIntent(), EXTRA_OPTIONS, Options.class);
         if (inputUri == null || options == null) {
             finish();
             return;

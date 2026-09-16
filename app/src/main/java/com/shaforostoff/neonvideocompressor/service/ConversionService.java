@@ -21,6 +21,7 @@ import android.os.SystemClock;
 import android.text.format.Formatter;
 
 import androidx.core.app.NotificationCompat;
+import androidx.core.content.IntentCompat;
 
 import com.shaforostoff.neonvideocompressor.Formats;
 import com.shaforostoff.neonvideocompressor.MainActivity;
@@ -284,7 +285,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
         if (worker != null) return; // already running
 
         ArrayList<Uri> inputs = intent.getParcelableArrayListExtra(EXTRA_INPUT_URIS);
-        Options options = (Options) intent.getSerializableExtra(EXTRA_OPTIONS);
+        Options options = IntentCompat.getParcelableExtra(intent, EXTRA_OPTIONS, Options.class);
         if (inputs == null || inputs.isEmpty() || options == null) {
             stopSelf();
             return;

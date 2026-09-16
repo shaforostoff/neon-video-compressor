@@ -1,11 +1,11 @@
 package com.shaforostoff.neonvideocompressor.engine;
 
 import android.media.MediaCodecInfo;
-
-import java.io.Serializable;
+import android.os.Parcel;
+import android.os.Parcelable;
 
 /** User-chosen conversion options. */
-public class Options implements Serializable {
+public class Options implements Parcelable {
 
     public enum VideoMode {
         /** Software HEVC via the bundled libx265 (CRF + preset). */
@@ -103,4 +103,56 @@ public class Options implements Serializable {
                 return MediaCodecInfo.CodecProfileLevel.AACObjectLC;
         }
     }
+
+    // --- Parcelable ---------------------------------------------------------
+    // Carried to the service and the preview screen as an Intent extra. Enums go
+    // over the wire as ordinals and are bounds-checked on the way back, so a
+    // malformed parcel falls back to the field's default rather than throwing.
+
+    public Options() {
+    }
+
+    private Options(Parcel in) {
+        videoMode = valueAt(VideoMode.values(), in.readInt(), videoMode);
+        crf = in.readInt();
+        preset = in.readString();
+        hwQuality = in.readInt();
+        hwBitrate = in.readInt();
+        hwBitrateMode = valueAt(HwBitrateMode.values(), in.readInt(), hwBitrateMode);
+        audioMode = valueAt(AudioMode.values(), in.readInt(), audioMode);
+        audioBitrate = in.readInt();
+    }
+
+    private static <E extends Enum<E>> E valueAt(E[] values, int ordinal, E fallback) {
+        return ordinal >= 0 && ordinal < values.length ? values[ordinal] : fallback;
+    }
+
+    @Override
+    public void writeToParcel(Parcel out, int flags) {
+        out.writeInt(videoMode.ordinal());
+        out.writeInt(crf);
+        out.writeString(preset);
+        out.writeInt(hwQuality);
+        out.writeInt(hwBitrate);
+        out.writeInt(hwBitrateMode.ordinal());
+        out.writeInt(audioMode.ordinal());
+        out.writeInt(audioBitrate);
+    }
+
+    @Override
+    public int describeContents() {
+        return 0;
+    }
+
+    public static final Creator<Options> CREATOR = new Creator<Options>() {
+        @Override
+        public Options createFromParcel(Parcel in) {
+            return new Options(in);
+        }
+
+        @Override
+        public Options[] newArray(int size) {
+            return new Options[size];
+        }
+    };
 }
