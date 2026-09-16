@@ -51,6 +51,11 @@ android {
     buildFeatures {
         viewBinding true
     }
+    androidResources {
+        // The app itself ships 6 languages; AppCompat/Material drag in ~80 more.
+        // Filtering trims resources.arsc by ~28% (608 KB -> 436 KB).
+        localeFilters += ['en', 'de', 'es', 'it', 'ru', 'uk']
+    }
     packaging {
         resources {
             // Kotlin compiler/reflection metadata — not used at runtime (no kotlin-reflect).
@@ -62,7 +67,6 @@ android {
 dependencies {
     implementation libs.androidx.appcompat
     implementation libs.material
-    implementation libs.androidx.constraintlayout
     implementation libs.androidx.activity
     testImplementation libs.junit
     androidTestImplementation libs.androidx.junit
