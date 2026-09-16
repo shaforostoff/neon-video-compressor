@@ -340,8 +340,8 @@ public class ProgressActivity extends AppCompatActivity {
                 txtPhase.setText(paused
                         ? getString(s.lowMemoryPaused
                                 ? R.string.phase_paused_lowmem_format
-                                : R.string.phase_paused_format, phaseLabel(s))
-                        : phaseLabel(s));
+                                : R.string.phase_paused_format, Formats.phase(this, s.phase))
+                        : Formats.phase(this, s.phase));
                 txtTime.setText(formatTime(s.processedUs) + " / " + formatTime(s.durationUs));
                 txtSpeed.setText(s.speed > 0
                         ? getString(R.string.speed_format, s.speed)
@@ -776,16 +776,6 @@ public class ProgressActivity extends AppCompatActivity {
 
     private void stopRamTicker() {
         ramHandler.removeCallbacks(ramTick);
-    }
-
-    private String phaseLabel(ConversionService.Snapshot s) {
-        switch (s.phase) {
-            case VIDEO: return getString(R.string.phase_video);
-            case AUDIO: return getString(R.string.phase_audio);
-            case MUXING: return getString(R.string.phase_mux);
-            case PUBLISHING: return getString(R.string.phase_publish);
-            default: return getString(R.string.preparing);
-        }
     }
 
     private static String formatTime(long us) {

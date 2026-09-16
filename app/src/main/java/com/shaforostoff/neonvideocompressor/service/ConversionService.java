@@ -22,6 +22,7 @@ import android.text.format.Formatter;
 
 import androidx.core.app.NotificationCompat;
 
+import com.shaforostoff.neonvideocompressor.Formats;
 import com.shaforostoff.neonvideocompressor.MainActivity;
 import com.shaforostoff.neonvideocompressor.OutputActions;
 import com.shaforostoff.neonvideocompressor.ProgressActivity;
@@ -620,9 +621,9 @@ public class ConversionService extends Service implements ConversionJob.Listener
             title = getString(paused ? R.string.notif_title_single_paused : R.string.notif_title_single_converting);
         }
 
-        String text = getString(R.string.notif_text_format, phaseLabel(snapshot.phase), percent);
+        String text = getString(R.string.notif_text_format, Formats.phase(this, snapshot.phase), percent);
         if (batch && snapshot.currentName != null) {
-            text = getString(R.string.notif_text_batch_format, snapshot.currentName, phaseLabel(snapshot.phase));
+            text = getString(R.string.notif_text_batch_format, snapshot.currentName, Formats.phase(this, snapshot.phase));
         }
 
         PendingIntent content = PendingIntent.getActivity(this, 0,
@@ -703,21 +704,6 @@ public class ConversionService extends Service implements ConversionJob.Listener
     private String queryName(Uri uri) {
         String name = SourceMetadata.queryDisplayName(this, uri);
         return name != null ? name : uri.getLastPathSegment();
-    }
-
-    private String phaseLabel(ConversionJob.Phase phase) {
-        switch (phase) {
-            case VIDEO:
-                return getString(R.string.phase_video);
-            case AUDIO:
-                return getString(R.string.phase_audio);
-            case MUXING:
-                return getString(R.string.phase_mux);
-            case PUBLISHING:
-                return getString(R.string.phase_publish);
-            default:
-                return getString(R.string.preparing);
-        }
     }
 
     public static void start(Context ctx, ArrayList<Uri> inputs, Options options) {
