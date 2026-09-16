@@ -163,13 +163,15 @@ public class ConversionJob {
             String displayName = buildOutputName(audioOnly);
             Uri item = MediaStoreOutput.createPending(context, displayName, audioOnly);
             boolean finalized = false;
-            ParcelFileDescriptor videoPfd = null;
             ParcelFileDescriptor audioPfd = null;
             ParcelFileDescriptor outPfd = null;
             try {
                 if (encodeAudio) {
                     audioPfd = ParcelFileDescriptor.open(audioTemp, ParcelFileDescriptor.MODE_READ_ONLY);
                 } else if (copyAudio) {
+                    // A separate handle, not inputFd: the hardware pass hands this
+                    // to a MediaExtractor, which (unlike the pread-based native
+                    // readers) is not safe to point at a shared file offset.
                     audioPfd = context.getContentResolver().openFileDescriptor(inputUri, "r");
                 }
                 int audioFd = audioPfd != null ? audioPfd.getFd() : -1;
@@ -231,10 +233,11 @@ public class ConversionJob {
                 } else {
                     // --- Mux pass: stream-copy the kept tracks into the item.
                     setPhase(Phase.MUXING);
-                    if (copyVideo) {
-                        videoPfd = context.getContentResolver().openFileDescriptor(inputUri, "r");
-                    } // else: video removed -> no video source
-                    int videoFd = videoPfd != null ? videoPfd.getFd() : -1;
+                    // The already-open input fd serves as the video source: the
+                    // native reader is pread-based and keeps its own offset, so
+                    // sharing one fd between the video and audio readers is safe
+                    // and saves reopening the same file. (-1 = video removed.)
+                    int videoFd = copyVideo ? inputFd : -1;
                     int muxResult = NativeConverter.nativeRemux(
                             videoFd, audioFd, outPfd.getFd(), false);
                     if (muxResult != NativeConverter.RET_OK) {
@@ -258,7 +261,6 @@ public class ConversionJob {
                 listener.onCompleted(item, displayName, partial);
             } finally {
                 liveOutPfd = null;
-                Quietly.close(videoPfd);
                 Quietly.close(audioPfd);
                 Quietly.close(outPfd);
                 if (!finalized) {
