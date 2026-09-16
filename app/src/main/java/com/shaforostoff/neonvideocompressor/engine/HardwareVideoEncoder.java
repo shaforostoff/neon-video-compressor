@@ -76,8 +76,8 @@ public final class HardwareVideoEncoder {
             Log.e(TAG, "encode failed", e);
             return control.cancelled ? RESULT_CANCELLED : RESULT_ERROR;
         } finally {
-            releaseQuietly(muxer);
-            releaseQuietly(audio);
+            Quietly.release(muxer);
+            Quietly.release(audio);
         }
     }
 
@@ -95,7 +95,7 @@ public final class HardwareVideoEncoder {
             Log.e(TAG, "encodeToPath failed", e);
             return control.cancelled ? RESULT_CANCELLED : RESULT_ERROR;
         } finally {
-            releaseQuietly(muxer);
+            Quietly.release(muxer);
         }
     }
 
@@ -278,8 +278,8 @@ public final class HardwareVideoEncoder {
                 } catch (Exception ignored) {
                 }
             }
-            safeStop(decoder);
-            safeStop(encoder);
+            Quietly.stopAndRelease(decoder);
+            Quietly.stopAndRelease(encoder);
             if (inputSurface != null) inputSurface.release();
             video.release();
         }
@@ -340,31 +340,6 @@ public final class HardwareVideoEncoder {
             } catch (Exception ignored) {
                 return fallback;
             }
-        }
-    }
-
-    private static void safeStop(MediaCodec codec) {
-        if (codec == null) return;
-        try {
-            codec.stop();
-        } catch (Exception ignored) {
-        }
-        codec.release();
-    }
-
-    private static void releaseQuietly(MediaMuxer muxer) {
-        if (muxer == null) return;
-        try {
-            muxer.release();
-        } catch (Exception ignored) {
-        }
-    }
-
-    private static void releaseQuietly(MediaExtractor extractor) {
-        if (extractor == null) return;
-        try {
-            extractor.release();
-        } catch (Exception ignored) {
         }
     }
 

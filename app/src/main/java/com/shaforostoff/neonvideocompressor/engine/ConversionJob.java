@@ -248,7 +248,7 @@ public class ConversionJob {
                 }
 
                 // Close the output fd so all writes flush before we unhide it.
-                closeQuietly(outPfd);
+                Quietly.close(outPfd);
                 outPfd = null;
 
                 // --- Publish: just clear IS_PENDING (the bytes are already there) ---
@@ -258,9 +258,9 @@ public class ConversionJob {
                 listener.onCompleted(item, displayName, partial);
             } finally {
                 liveOutPfd = null;
-                closeQuietly(videoPfd);
-                closeQuietly(audioPfd);
-                closeQuietly(outPfd);
+                Quietly.close(videoPfd);
+                Quietly.close(audioPfd);
+                Quietly.close(outPfd);
                 if (!finalized) {
                     try {
                         context.getContentResolver().delete(item, null, null);
@@ -277,7 +277,7 @@ public class ConversionJob {
             }
         } finally {
             deleteQuietly(audioTemp);
-            closeQuietly(inputPfd);
+            Quietly.close(inputPfd);
         }
     }
 
@@ -423,15 +423,6 @@ public class ConversionJob {
             if (f != null && f.exists()) {
                 //noinspection ResultOfMethodCallIgnored
                 f.delete();
-            }
-        }
-    }
-
-    private static void closeQuietly(ParcelFileDescriptor pfd) {
-        if (pfd != null) {
-            try {
-                pfd.close();
-            } catch (Exception ignored) {
             }
         }
     }

@@ -26,6 +26,7 @@ import com.shaforostoff.neonvideocompressor.engine.HardwareVideoEncoder;
 import com.shaforostoff.neonvideocompressor.engine.JobControl;
 import com.shaforostoff.neonvideocompressor.engine.NativeConverter;
 import com.shaforostoff.neonvideocompressor.engine.Options;
+import com.shaforostoff.neonvideocompressor.engine.Quietly;
 
 import java.io.File;
 
@@ -286,8 +287,8 @@ public class PreviewActivity extends AppCompatActivity {
                 c.destroy();
                 if (ctrl == c) ctrl = null;
             }
-            closeQuietly(encPfd);
-            closeQuietly(copyPfd);
+            Quietly.close(encPfd);
+            Quietly.close(copyPfd);
         }
     }
 
@@ -580,12 +581,6 @@ public class PreviewActivity extends AppCompatActivity {
 
         @Override
         public void onSurfaceTextureUpdated(SurfaceTexture st) {
-        }
-    }
-
-    private static void closeQuietly(ParcelFileDescriptor pfd) {
-        if (pfd != null) {
-            try { pfd.close(); } catch (Exception ignored) {}
         }
     }
 }

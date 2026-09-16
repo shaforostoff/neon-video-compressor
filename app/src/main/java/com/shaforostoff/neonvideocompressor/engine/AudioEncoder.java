@@ -198,26 +198,18 @@ public final class AudioEncoder {
                 }
             }
         } finally {
-            safeStop(decoder);
-            safeStop(encoder);
+            Quietly.stopAndRelease(decoder);
+            Quietly.stopAndRelease(encoder);
             if (muxerStarted) {
                 try {
                     muxer.stop();
                 } catch (Exception ignored) {
                 }
             }
-            muxer.release();
-            extractor.release();
+            Quietly.release(muxer);
+            Quietly.release(extractor);
         }
         return result;
-    }
-
-    private static void safeStop(MediaCodec codec) {
-        try {
-            codec.stop();
-        } catch (Exception ignored) {
-        }
-        codec.release();
     }
 
     private AudioEncoder() {
