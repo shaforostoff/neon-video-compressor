@@ -15,6 +15,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Debug;
+import android.os.FileUtils;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -718,9 +719,11 @@ public class ProgressActivity extends AppCompatActivity {
                 try (java.io.InputStream in = getContentResolver().openInputStream(output);
                      java.io.OutputStream out = getContentResolver().openOutputStream(dest, "w")) {
                     if (in == null || out == null) throw new java.io.IOException("open streams failed");
-                    byte[] buf = new byte[1 << 20];
-                    int n;
-                    while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                    // Both sides are whole-file MediaStore items, so these are
+                    // FileInputStream/FileOutputStream and FileUtils.copy takes its
+                    // sendfile(2) path: the bytes never enter the Java heap (the old
+                    // hand-rolled loop held a 1 MB buffer for a whole video).
+                    FileUtils.copy(in, out);
                 }
 
                 android.content.ContentValues done = new android.content.ContentValues();
