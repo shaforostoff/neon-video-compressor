@@ -353,32 +353,19 @@ public class MainActivity extends AppCompatActivity {
             } catch (Exception ignored) {
             }
         }
-        // Cap the hardware bitrate slider at the source's own bitrate (using the
-        // first video for a batch). Re-apply if that control is on screen.
-        sourceBitrateBps = probeBitrate(selectedUris.isEmpty() ? null : selectedUris.get(0));
+        // Unknown until the background probe lands; the slider falls back to its
+        // fixed ceiling until then, and probeSelection() re-applies the real cap.
+        sourceBitrateBps = 0;
         applyVideoModeUi(spVideoMode.getSelectedItemPosition());
         renderSelection();
-    }
-
-    /** Overall container bitrate (bits/sec) of a source, or 0 if unknown. */
-    private int probeBitrate(Uri uri) {
-        if (uri == null) return 0;
-        MediaMetadataRetriever r = new MediaMetadataRetriever();
-        try {
-            r.setDataSource(this, uri);
-            String b = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE);
-            return b != null ? Integer.parseInt(b) : 0;
-        } catch (Exception e) {
-            return 0;
-        } finally {
-            try { r.release(); } catch (Exception ignored) {}
-        }
     }
 
     /** Updates the file label and button state to reflect {@link #selectedUris}. */
     private void renderSelection() {
         if (selectedUris.size() == 1) {
-            txtFile.setText(describe(selectedUris.get(0)));
+            // Cheap, I/O-free placeholder; probeSelection() swaps in the real
+            // display name and duration when the background probe returns.
+            txtFile.setText(selectedUris.get(0).getLastPathSegment());
         } else if (!selectedUris.isEmpty()) {
             txtFile.setText(String.format(Locale.US,
                     getString(R.string.videos_selected), selectedUris.size()));
@@ -388,67 +375,92 @@ public class MainActivity extends AppCompatActivity {
         boolean any = !selectedUris.isEmpty();
         btnConvert.setEnabled(any);
         btnPreview.setEnabled(any);
-        probeSelectionMeta();
+        probeSelection();
     }
 
     /**
-     * Fills in the size line under the filename (plus the bitrate when a single
-     * video is selected). Reading it costs a content query per Uri and, for one
-     * video, a {@link MediaMetadataRetriever} open, so it runs off the main
-     * thread; a result belonging to a superseded selection is dropped.
+     * Reads everything the selection lines need — display name, duration, total
+     * size and (for a single video) bitrate — on one background pass.
+     *
+     * <p>All of it is I/O: a content query per Uri, a name lookup that may itself
+     * fall back to a MediaStore match, and a {@link MediaMetadataRetriever} open.
+     * None of that belongs on the main thread, and the duration and bitrate come
+     * off the same retriever rather than opening it twice. A result belonging to
+     * a superseded selection is dropped.
      */
-    private void probeSelectionMeta() {
+    private void probeSelection() {
         txtFileMeta.setVisibility(View.GONE);
         if (selectedUris.isEmpty()) return;
         final List<Uri> uris = new ArrayList<>(selectedUris);
+        final boolean single = uris.size() == 1;
         final int token = ++selectionToken;
         new Thread(() -> {
-            String meta = describeSize(uris);
+            long totalBytes = 0;
+            for (Uri uri : uris) totalBytes += SourceMetadata.querySize(this, uri);
+            String size = totalBytes > 0 ? Formatter.formatShortFileSize(this, totalBytes) : null;
+
+            String title = null;
+            String meta;
+            int bps = 0;
+            if (single) {
+                Uri uri = uris.get(0);
+                String name = SourceMetadata.queryDisplayName(this, uri);
+                long[] durationAndRate = probeDurationAndBitrate(uri);
+                long durationMs = durationAndRate[0];
+                bps = (int) durationAndRate[1];
+
+                title = (name != null ? name : uri.getLastPathSegment())
+                        + (durationMs > 0
+                                ? String.format(Locale.US, "  (%02d:%02d)",
+                                        durationMs / 60_000, (durationMs / 1000) % 60)
+                                : "");
+                String rate = bps > 0 ? Formats.bitrate(this, bps) : null;
+                meta = size == null ? rate : (rate != null ? size + " · " + rate : size);
+            } else {
+                meta = size != null ? getString(R.string.selection_total_size, size) : null;
+            }
+
+            final String fTitle = title, fMeta = meta;
+            final int fBps = bps;
             runOnUiThread(() -> {
-                if (token != selectionToken || meta == null) return;
-                txtFileMeta.setText(meta);
-                txtFileMeta.setVisibility(View.VISIBLE);
+                if (token != selectionToken) return;
+                if (fTitle != null) txtFile.setText(fTitle);
+                if (fMeta != null) {
+                    txtFileMeta.setText(fMeta);
+                    txtFileMeta.setVisibility(View.VISIBLE);
+                }
+                // Cap the hardware bitrate slider at the source's own bitrate —
+                // going above it cannot add quality.
+                if (fBps > 0 && fBps != sourceBitrateBps) {
+                    sourceBitrateBps = fBps;
+                    applyVideoModeUi(spVideoMode.getSelectedItemPosition());
+                }
             });
         }, "selection-meta").start();
     }
 
-    /**
-     * @return "12.5 MB · 4.2 Mbps" for a single video, the combined size for
-     * several, or null when nothing could be determined.
-     */
-    private String describeSize(List<Uri> uris) {
-        long totalBytes = 0;
-        for (Uri uri : uris) totalBytes += SourceMetadata.querySize(this, uri);
-        String size = totalBytes > 0 ? Formatter.formatShortFileSize(this, totalBytes) : null;
-        if (uris.size() > 1) {
-            return size != null ? getString(R.string.selection_total_size, size) : null;
-        }
-        int bps = probeBitrate(uris.get(0));
-        String rate = bps > 0 ? Formats.bitrate(this, bps) : null;
-        if (size == null) return rate;
-        return rate != null ? size + " · " + rate : size;
-    }
-
-    private String describe(Uri uri) {
-        String name = queryName(uri);
-        String dur = "";
+    /** @return {@code {durationMs, bitrateBps}}; 0 for whatever the container doesn't report. */
+    private long[] probeDurationAndBitrate(Uri uri) {
         MediaMetadataRetriever r = new MediaMetadataRetriever();
         try {
             r.setDataSource(this, uri);
-            String ms = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
-            if (ms != null) {
-                long s = Long.parseLong(ms) / 1000;
-                dur = String.format(Locale.US, "  (%02d:%02d)", s / 60, s % 60);
-            }
-        } catch (Exception ignored) {
+            return new long[]{
+                    parseLongOrZero(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)),
+                    parseLongOrZero(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE))};
+        } catch (Exception e) {
+            return new long[]{0, 0};
         } finally {
             try { r.release(); } catch (Exception ignored) {}
         }
-        return (name != null ? name : uri.getLastPathSegment()) + dur;
     }
 
-    private String queryName(Uri uri) {
-        return SourceMetadata.queryDisplayName(this, uri);
+    private static long parseLongOrZero(String s) {
+        if (s == null) return 0;
+        try {
+            return Long.parseLong(s);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     private void onSelectVideosClicked() {
