@@ -5,11 +5,9 @@ import android.app.PendingIntent;
 import android.app.RecoverableSecurityException;
 import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
-import android.content.ContentUris;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.Context;
-import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
@@ -24,7 +22,6 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
-import android.provider.OpenableColumns;
 import android.text.format.Formatter;
 import android.view.View;
 import android.widget.ProgressBar;
@@ -35,7 +32,6 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.IntentSenderRequest;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -43,6 +39,7 @@ import androidx.core.view.WindowInsetsCompat;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.shaforostoff.neonvideocompressor.engine.ConversionJob;
+import com.shaforostoff.neonvideocompressor.engine.MediaStoreOutput;
 import com.shaforostoff.neonvideocompressor.engine.SourceMetadata;
 import com.shaforostoff.neonvideocompressor.service.ConversionService;
 import com.shaforostoff.neonvideocompressor.service.ResultStore;
@@ -66,17 +63,14 @@ public class ProgressActivity extends AppCompatActivity {
     // "Replace original(s)" offer for both single and batch conversions.
     private final ArrayList<Uri> resultOutputSources = new ArrayList<>();
     private boolean resultAudioOnly;
-    // Source of a single-file conversion + whether the output is partial: decide
-    // if "Replace original" may be offered (never for a stopped-early file).
+    // Source of a single-file conversion, for the bitrate comparison.
     private Uri resultInputUri;
-    private boolean resultPartial;
 
     private static final String STATE_OUTPUTS = "result_outputs";
     private static final String STATE_OUTPUT_SOURCES = "result_output_sources";
     private static final String STATE_AUDIO_ONLY = "result_audio_only";
     private static final String STATE_FINISHED = "finished_state";
     private static final String STATE_INPUT_URI = "result_input_uri";
-    private static final String STATE_PARTIAL = "result_partial";
 
     // getPss() walks /proc/self/smaps, so sample it at most once per second
     // rather than on every per-frame snapshot.
@@ -145,13 +139,8 @@ public class ProgressActivity extends AppCompatActivity {
     private final ActivityResultLauncher<IntentSenderRequest> singleDeleteLauncher =
             registerForActivityResult(new ActivityResultContracts.StartIntentSenderForResult(), result -> {
                 if (result.getResultCode() == RESULT_OK && api29Index < pendingReplace.size()) {
-                    ReplaceItem it = pendingReplace.get(api29Index);
                     try {
-                        if (getContentResolver().delete(it.mediaUri, null, null) > 0) {
-                            applyReplaceMove(it);
-                        } else {
-                            toastReplaceFailed();
-                        }
+                        deleteThenMove(pendingReplace.get(api29Index));
                     } catch (Exception e) {
                         toastReplaceFailed();
                     }
@@ -225,9 +214,7 @@ public class ProgressActivity extends AppCompatActivity {
         btnReplace = findViewById(R.id.btnReplace);
 
         btnPauseResume.setOnClickListener(v -> {
-            if (!bound) return;
-            if (paused) service.resume();
-            else service.pause();
+            if (bound) service.setPaused(!paused);
         });
         btnCancel.setOnClickListener(v -> {
             if (finishedState) {
@@ -251,7 +238,8 @@ public class ProgressActivity extends AppCompatActivity {
                     getString(R.string.share_via)));
         });
         btnReplace.setOnClickListener(v -> {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasVideoLibraryPermission()) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                    && !SourceMetadata.hasVideoLibraryPermission(this)) {
                 libraryPermissionLauncher.launch(Manifest.permission.READ_MEDIA_VIDEO);
             } else {
                 confirmReplace();
@@ -268,12 +256,8 @@ public class ProgressActivity extends AppCompatActivity {
             resultAudioOnly = savedInstanceState.getBoolean(STATE_AUDIO_ONLY);
             finishedState = savedInstanceState.getBoolean(STATE_FINISHED);
             resultInputUri = savedInstanceState.getParcelable(STATE_INPUT_URI);
-            resultPartial = savedInstanceState.getBoolean(STATE_PARTIAL);
             if (finishedState) {
-                btnPauseResume.setEnabled(false);
-                btnCancel.setText(R.string.close);
-                rowResultActions.setVisibility(resultOutputs.isEmpty() ? View.GONE : View.VISIBLE);
-                updateReplaceButton();
+                showTerminalState();
                 showBitrateComparison(); // recompute after rotation (not saved in state)
             }
         }
@@ -287,7 +271,6 @@ public class ProgressActivity extends AppCompatActivity {
         out.putBoolean(STATE_AUDIO_ONLY, resultAudioOnly);
         out.putBoolean(STATE_FINISHED, finishedState);
         out.putParcelable(STATE_INPUT_URI, resultInputUri);
-        out.putBoolean(STATE_PARTIAL, resultPartial);
     }
 
     @Override
@@ -356,8 +339,8 @@ public class ProgressActivity extends AppCompatActivity {
                 txtPhase.setText(paused
                         ? getString(s.lowMemoryPaused
                                 ? R.string.phase_paused_lowmem_format
-                                : R.string.phase_paused_format, Formats.phase(this, s.phase))
-                        : Formats.phase(this, s.phase));
+                                : R.string.phase_paused_format, getString(s.phase.label))
+                        : getString(s.phase.label));
                 txtTime.setText(formatTime(s.processedUs) + " / " + formatTime(s.durationUs));
                 txtSpeed.setText(s.speed > 0
                         ? getString(R.string.speed_format, s.speed)
@@ -383,20 +366,9 @@ public class ProgressActivity extends AppCompatActivity {
                 }
                 break;
             case DONE:
-                finishedState = true;
                 // The user is now looking at the finished screen — mark the durable
                 // result seen so it is not auto-reopened on the next launch.
                 ResultStore.markAcknowledged(this);
-                txtBatch.setVisibility(View.GONE);
-                txtPhase.setText(batch ? R.string.batch_complete : R.string.done);
-                txtTime.setText(s.message != null ? s.message : "");
-                String savedTo = getString(s.audioOnly ? R.string.saved_to_music : R.string.saved_to_movies);
-                txtSpeed.setText(savedTo);
-                txtSize.setVisibility(View.GONE);
-                stopRamTicker();
-                txtRam.setText("");
-                btnPauseResume.setEnabled(false);
-                btnCancel.setText(R.string.close);
                 // Cache outputs (defensive copy off the shared Snapshot) and offer
                 // Open/Share — covers full and partial success.
                 resultOutputs.clear();
@@ -405,43 +377,45 @@ public class ProgressActivity extends AppCompatActivity {
                 resultOutputSources.addAll(s.outputSources);
                 resultAudioOnly = s.audioOnly;
                 resultInputUri = s.inputUri;
-                resultPartial = s.partial;
-                rowResultActions.setVisibility(resultOutputs.isEmpty() ? View.GONE : View.VISIBLE);
-                updateReplaceButton();
+                showTerminalState();
+                txtPhase.setText(batch ? R.string.batch_complete : R.string.done);
+                txtTime.setText(s.message != null ? s.message : "");
+                String savedTo = getString(s.audioOnly ? R.string.saved_to_music : R.string.saved_to_movies);
+                txtSpeed.setText(savedTo);
                 showBitrateComparison();
                 Toast.makeText(this, s.message != null ? s.message : savedTo,
                         Toast.LENGTH_LONG).show();
                 break;
             case ERROR:
-                finishedState = true;
-                txtBatch.setVisibility(View.GONE);
+                showTerminalState();
                 txtPhase.setText(R.string.error_label);
                 txtTime.setText(s.message != null ? s.message : getString(R.string.unknown_error));
-                txtSpeed.setText("");
-                txtSize.setVisibility(View.GONE);
-                stopRamTicker();
-                txtRam.setText("");
-                btnPauseResume.setEnabled(false);
-                btnCancel.setText(R.string.close);
-                rowResultActions.setVisibility(View.GONE);
-                btnReplace.setVisibility(View.GONE);
                 break;
             case CANCELLED:
-                finishedState = true;
-                txtBatch.setVisibility(View.GONE);
+                showTerminalState();
                 txtPhase.setText(R.string.cancelled_label);
                 txtTime.setText(s.message != null ? s.message : "");
-                txtSize.setVisibility(View.GONE);
-                stopRamTicker();
-                txtRam.setText("");
-                btnPauseResume.setEnabled(false);
-                btnCancel.setText(R.string.close);
-                rowResultActions.setVisibility(View.GONE);
-                btnReplace.setVisibility(View.GONE);
                 break;
             default:
                 break;
         }
+    }
+
+    /**
+     * The part every finished screen (done / error / cancelled, or one restored
+     * after rotation) shares. Open/Share/Replace follow the cached results.
+     */
+    private void showTerminalState() {
+        finishedState = true;
+        txtBatch.setVisibility(View.GONE);
+        txtSpeed.setText("");
+        txtSize.setVisibility(View.GONE);
+        stopRamTicker();
+        txtRam.setText("");
+        btnPauseResume.setEnabled(false);
+        btnCancel.setText(R.string.close);
+        rowResultActions.setVisibility(resultOutputs.isEmpty() ? View.GONE : View.VISIBLE);
+        updateReplaceButton();
     }
 
     // --- Replace original(s): delete each source, move its output into place ----
@@ -480,7 +454,8 @@ public class ProgressActivity extends AppCompatActivity {
             Uri src = firstReplaceableSource();
             Uri media = src != null ? resolveToMediaUri(src) : null;
             Uri nameSource = media != null ? media : src;
-            String name = nameSource != null ? queryDisplayName(nameSource) : null;
+            String name = nameSource != null
+                    ? SourceMetadata.queryDisplayName(this, nameSource) : null;
             title = getString(R.string.replace_confirm_title);
             message = getString(R.string.replace_confirm_message,
                     name != null ? name : getString(R.string.replace_this_video));
@@ -507,17 +482,13 @@ public class ProgressActivity extends AppCompatActivity {
         for (int i = 0; i < resultOutputs.size(); i++) {
             Uri source = i < resultOutputSources.size() ? resultOutputSources.get(i) : null;
             if (source == null) continue;
-            Uri media = resolveToMediaUri(source);            if (media == null) {
+            Uri media = resolveToMediaUri(source);
+            if (media == null) {
                 deleteSafDocument(source, i);
                 continue;
             }
             ReplaceItem item = new ReplaceItem(i, resultOutputs.get(i), media);
-            String[] loc = captureLocation(media);
-            if (loc != null) {
-                item.volume = loc[0];
-                item.relPath = loc[1];
-                item.baseName = loc[2];
-            }
+            captureLocation(item);
             pendingReplace.add(item);
         }
         replaceMediaCount = pendingReplace.size();
@@ -548,13 +519,8 @@ public class ProgressActivity extends AppCompatActivity {
             return;
         }
         api29Index = index;
-        ReplaceItem it = pendingReplace.get(index);
         try {
-            if (getContentResolver().delete(it.mediaUri, null, null) > 0) {
-                applyReplaceMove(it);
-            } else {
-                toastReplaceFailed();
-            }
+            deleteThenMove(pendingReplace.get(index));
             deleteNextApi29(index + 1);
         } catch (RecoverableSecurityException e) {
             // Resumes in singleDeleteLauncher, which advances to index+1.
@@ -564,6 +530,12 @@ public class ProgressActivity extends AppCompatActivity {
             toastReplaceFailed();
             deleteNextApi29(index + 1);
         }
+    }
+
+    /** Deletes one source and moves its output into place; throws what delete() throws. */
+    private void deleteThenMove(ReplaceItem it) {
+        if (getContentResolver().delete(it.mediaUri, null, null) > 0) applyReplaceMove(it);
+        else toastReplaceFailed();
     }
 
     /** A SAF document with no MediaStore item: delete it directly; the output stays where it was. */
@@ -592,12 +564,14 @@ public class ProgressActivity extends AppCompatActivity {
                     return null; // SAF doc with no MediaStore backing
                 }
             }
-            if (isPhotoPickerUri(uri)) return findMediaStoreUri(uri);
+            if (SourceMetadata.isPhotoPickerUri(uri)) {
+                return SourceMetadata.findMediaStoreVideo(this, uri);
+            }
             if (MediaStore.AUTHORITY.equals(uri.getAuthority())) return uri; // already a MediaStore item
             // Another app's provider (e.g. Google Photos share): createDeleteRequest
             // only takes MediaStore ID uris, so find the item behind it.
             Uri embedded = findEmbeddedMediaUri(uri);
-            return embedded != null ? embedded : findMediaStoreUri(uri);
+            return embedded != null ? embedded : SourceMetadata.findMediaStoreVideo(this, uri);
         } catch (Exception e) {
             return null;
         }
@@ -620,95 +594,29 @@ public class ProgressActivity extends AppCompatActivity {
             }
             // Unreadable without library access: trust the provider's uri. The
             // system delete dialog still shows the user which item goes.
-            if (!hasVideoLibraryPermission()) return candidate;
+            if (!SourceMetadata.hasVideoLibraryPermission(this)) return candidate;
         }
         return null;
-    }
-
-    private boolean hasVideoLibraryPermission() {
-        String perm = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-                ? Manifest.permission.READ_MEDIA_VIDEO
-                : Manifest.permission.READ_EXTERNAL_STORAGE;
-        return ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED;
     }
 
     private static final String TAG_REPLACE = "ReplaceOriginal";
 
-    private static boolean isPhotoPickerUri(Uri uri) {
-        String path = uri.getPath();
-        return "media".equals(uri.getAuthority()) && path != null && path.startsWith("/picker");
-    }
-
-    /**
-     * Locates the MediaStore video item behind a photo-picker uri. The picker
-     * redacts DISPLAY_NAME (it returns "<pickerId>.mp4"), so a name lookup is
-     * useless — but for local items the picker id IS the MediaStore {@code _ID}
-     * (verified on Android 15), so try that first and sanity-check by SIZE;
-     * fall back to a unique SIZE match.
-     */
-    private Uri findMediaStoreUri(Uri uri) {
-        long size = -1;
-        try (Cursor c = getContentResolver().query(uri,
-                new String[]{OpenableColumns.SIZE}, null, null, null)) {
-            if (c != null && c.moveToFirst()) size = c.getLong(0);
-        } catch (Exception ignored) {
-        }
-
-        Uri videos = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL);
-
-        try {
-            long id = ContentUris.parseId(uri);
-            Uri candidate = ContentUris.withAppendedId(videos, id);
-            try (Cursor c = getContentResolver().query(candidate,
-                    new String[]{MediaStore.MediaColumns.SIZE}, null, null, null)) {
-                if (c != null && c.moveToFirst() && (size <= 0 || c.getLong(0) == size)) {
-                    return candidate;
-                }
-            }
-        } catch (Exception ignored) {
-        }
-
-        if (size <= 0) return null;
-        try (Cursor c = getContentResolver().query(videos,
-                new String[]{MediaStore.MediaColumns._ID},
-                MediaStore.MediaColumns.SIZE + "=?",
-                new String[]{String.valueOf(size)}, null)) {
-            if (c != null && c.getCount() == 1 && c.moveToFirst()) {
-                return ContentUris.withAppendedId(videos, c.getLong(0));
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
-    }
-
-    private String queryDisplayName(Uri uri) {
-        try (Cursor c = getContentResolver().query(uri,
-                new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
-            if (c != null && c.moveToFirst()) return c.getString(0);
-        } catch (Exception ignored) {
-        }
-        return null;
-    }
-
-    /** @return {volume, relPath, baseName} for a media uri, or null if it can't be read. */
-    private String[] captureLocation(Uri mediaUri) {
-        try (Cursor c = getContentResolver().query(mediaUri, new String[]{
+    /** Fills in the item's source location; left null where it can't be read. */
+    private void captureLocation(ReplaceItem it) {
+        try (Cursor c = getContentResolver().query(it.mediaUri, new String[]{
                 MediaStore.MediaColumns.VOLUME_NAME,
                 MediaStore.MediaColumns.RELATIVE_PATH,
                 MediaStore.MediaColumns.DISPLAY_NAME}, null, null, null)) {
             if (c != null && c.moveToFirst()) {
+                it.volume = c.getString(0);
+                it.relPath = c.getString(1);
                 String name = c.getString(2);
-                String base = name;
-                if (name != null) {
-                    int dot = name.lastIndexOf('.');
-                    if (dot > 0) base = name.substring(0, dot);
-                }
-                return new String[]{c.getString(0), c.getString(1), base};
+                int dot = name != null ? name.lastIndexOf('.') : -1;
+                it.baseName = dot > 0 ? name.substring(0, dot) : name;
             }
         } catch (Exception e) {
             android.util.Log.w(TAG_REPLACE, "captureLocation failed", e);
         }
-        return null;
     }
 
     /** A source was deleted: drop it from the replaceable set and move its output into place. */
@@ -754,16 +662,7 @@ public class ProgressActivity extends AppCompatActivity {
         new Thread(() -> {
             Uri dest = null;
             try {
-                android.content.ContentValues values = new android.content.ContentValues();
-                values.put(MediaStore.MediaColumns.DISPLAY_NAME, newName);
-                values.put(MediaStore.MediaColumns.MIME_TYPE, audioOnly ? "audio/mp4" : "video/mp4");
-                values.put(MediaStore.MediaColumns.RELATIVE_PATH, relPath);
-                values.put(MediaStore.MediaColumns.IS_PENDING, 1);
-                Uri collection = audioOnly
-                        ? MediaStore.Audio.Media.getContentUri(volume)
-                        : MediaStore.Video.Media.getContentUri(volume);
-                dest = getContentResolver().insert(collection, values);
-                if (dest == null) throw new java.io.IOException("insert failed");
+                dest = MediaStoreOutput.createPending(this, newName, audioOnly, volume, relPath);
 
                 try (java.io.InputStream in = getContentResolver().openInputStream(output);
                      java.io.OutputStream out = getContentResolver().openOutputStream(dest, "w")) {
@@ -775,9 +674,7 @@ public class ProgressActivity extends AppCompatActivity {
                     FileUtils.copy(in, out);
                 }
 
-                android.content.ContentValues done = new android.content.ContentValues();
-                done.put(MediaStore.MediaColumns.IS_PENDING, 0);
-                getContentResolver().update(dest, done, null, null);
+                MediaStoreOutput.finalizePending(this, dest);
 
                 getContentResolver().delete(output, null, null); // app-owned: no consent needed
 

@@ -18,7 +18,20 @@ import java.io.IOException;
  */
 public class ConversionJob {
 
-    public enum Phase {PROBING, VIDEO, AUDIO, MUXING, PUBLISHING}
+    public enum Phase {
+        PROBING(R.string.preparing),
+        VIDEO(R.string.phase_video),
+        AUDIO(R.string.phase_audio),
+        MUXING(R.string.phase_mux),
+        PUBLISHING(R.string.phase_publish);
+
+        /** Localized name, as shown on screen and in the notification. */
+        public final int label;
+
+        Phase(int label) {
+            this.label = label;
+        }
+    }
 
     public interface Listener {
         /**
@@ -79,9 +92,9 @@ public class ConversionJob {
     // output and this audio straight into the final MediaStore item.
     private File audioTemp;
 
-    // Live handle to the final output while the direct encode+mux pass runs, so
-    // progress can report real output bytes (fstat) instead of a temp's size.
-    private volatile ParcelFileDescriptor liveOutPfd;
+    // Live handle to the final output, so the video pass's progress can report
+    // real output bytes (fstat). Only touched on the worker thread.
+    private ParcelFileDescriptor liveOutPfd;
     private long lastOutputBytes;
 
     public ConversionJob(Context context, Uri inputUri, long sourceSizeBytes, Options options,
@@ -178,49 +191,27 @@ public class ConversionJob {
 
                 outPfd = context.getContentResolver().openFileDescriptor(item, "rw");
                 if (outPfd == null) throw new IOException(context.getString(R.string.error_open_output));
+                liveOutPfd = outPfd;
 
                 boolean partial = false;
-                if (encodeVideo && options.encodesVideoHardware()) {
-                    // --- Hardware video pass: decode -> HW HEVC encode -> mux (with
-                    // the audio) straight into the destination item's "rw" fd.
+                if (encodeVideo) {
+                    // --- Video pass: decode -> HEVC encode (hardware MediaCodec or
+                    // x265) -> mux (with the audio) straight into the destination
+                    // item's "rw" fd — no video temp file.
                     setPhase(Phase.VIDEO);
-                    liveOutPfd = outPfd;
-                    int r;
-                    try {
-                        r = HardwareVideoEncoder.encode(
-                                inputPfd.getFileDescriptor(),
-                                encodeAudio ? audioTemp.getAbsolutePath() : null,
-                                copyAudio && audioPfd != null ? audioPfd.getFileDescriptor() : null,
-                                outPfd.getFileDescriptor(),
-                                options, control, 0L,
-                                processedUs -> report(Phase.VIDEO, processedUs));
-                    } finally {
-                        liveOutPfd = null;
-                    }
-                    if (r == HardwareVideoEncoder.RESULT_CANCELLED || control.cancelled) {
-                        listener.onCancelled();
-                        return; // finally deletes the still-pending item
-                    }
-                    if (r != HardwareVideoEncoder.RESULT_OK
-                            && r != HardwareVideoEncoder.RESULT_STOPPED) {
-                        listener.onError(context.getString(R.string.error_video_encode_failed, r));
-                        return;
-                    }
-                    partial = r == HardwareVideoEncoder.RESULT_STOPPED;
-                } else if (encodeVideo) {
-                    // --- Video pass: encode x265 and mux (with the audio) straight
-                    // into the destination item's "rw" fd — no video temp file.
-                    setPhase(Phase.VIDEO);
-                    liveOutPfd = outPfd;
-                    int r;
-                    try {
-                        r = NativeConverter.nativeTranscodeMux(
-                                inputFd, audioFd, outPfd.getFd(),
-                                options.crf, options.preset, control.nativeHandle(),
-                                processedUs -> report(Phase.VIDEO, processedUs));
-                    } finally {
-                        liveOutPfd = null;
-                    }
+                    NativeConverter.ProgressCallback onProgress =
+                            processedUs -> report(Phase.VIDEO, processedUs);
+                    int r = options.encodesVideoHardware()
+                            ? HardwareVideoEncoder.encode(
+                                    inputPfd.getFileDescriptor(),
+                                    encodeAudio ? audioTemp.getAbsolutePath() : null,
+                                    copyAudio && audioPfd != null ? audioPfd.getFileDescriptor() : null,
+                                    outPfd.getFileDescriptor(),
+                                    options, control, 0L, onProgress)
+                            : NativeConverter.nativeTranscodeMux(
+                                    inputFd, audioFd, outPfd.getFd(),
+                                    options.crf, options.preset, control.nativeHandle(),
+                                    0L, onProgress);
                     if (r == NativeConverter.RET_CANCELLED || control.cancelled) {
                         listener.onCancelled();
                         return; // finally deletes the still-pending item
@@ -239,7 +230,7 @@ public class ConversionJob {
                     // and saves reopening the same file. (-1 = video removed.)
                     int videoFd = copyVideo ? inputFd : -1;
                     int muxResult = NativeConverter.nativeRemux(
-                            videoFd, audioFd, outPfd.getFd(), false);
+                            videoFd, audioFd, outPfd.getFd(), 0L);
                     if (muxResult != NativeConverter.RET_OK) {
                         listener.onError(context.getString(R.string.error_muxing_failed, muxResult));
                         return;

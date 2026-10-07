@@ -3,6 +3,7 @@ package com.shaforostoff.neonvideocompressor.engine;
 import android.media.MediaCodec;
 import android.media.MediaExtractor;
 import android.media.MediaMuxer;
+import android.media.MediaPlayer;
 import android.os.ParcelFileDescriptor;
 
 /**
@@ -40,6 +41,14 @@ public final class Quietly {
         if (muxer == null) return;
         try {
             muxer.release();
+        } catch (Exception ignored) {
+        }
+    }
+
+    public static void release(MediaPlayer player) {
+        if (player == null) return;
+        try {
+            player.release();
         } catch (Exception ignored) {
         }
     }

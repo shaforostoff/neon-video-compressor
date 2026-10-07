@@ -24,12 +24,18 @@ public class Options implements Parcelable {
         VBR
     }
 
+    /** In the order of the {@code audio_modes} spinner entries. */
     public enum AudioMode {
         ENCODE_AAC_LC,
         ENCODE_AAC_HE,
         ENCODE_AAC_HE_V2,
         COPY,
-        REMOVE
+        REMOVE;
+
+        /** True for the AAC re-encode modes. */
+        public boolean encodes() {
+            return ordinal() <= ENCODE_AAC_HE_V2.ordinal();
+        }
     }
 
     public VideoMode videoMode = VideoMode.ENCODE_HEVC;
@@ -58,11 +64,6 @@ public class Options implements Parcelable {
         return videoMode == VideoMode.ENCODE_HEVC || videoMode == VideoMode.ENCODE_HEVC_HW;
     }
 
-    /** Software (libx265) HEVC encode — honours {@link #crf} and {@link #preset}. */
-    public boolean encodesVideoSoftware() {
-        return videoMode == VideoMode.ENCODE_HEVC;
-    }
-
     /** Hardware (MediaCodec) HEVC encode — honours {@link #hwQuality}. */
     public boolean encodesVideoHardware() {
         return videoMode == VideoMode.ENCODE_HEVC_HW;
@@ -78,9 +79,7 @@ public class Options implements Parcelable {
     }
 
     public boolean encodesAudio() {
-        return audioMode == AudioMode.ENCODE_AAC_LC
-                || audioMode == AudioMode.ENCODE_AAC_HE
-                || audioMode == AudioMode.ENCODE_AAC_HE_V2;
+        return audioMode.encodes();
     }
 
     public boolean copiesAudio() {

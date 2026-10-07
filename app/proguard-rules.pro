@@ -1,5 +1,5 @@
 # --- JNI surface -----------------------------------------------------------
-# Native methods (Java_com_shaforostoff_..._nativeTranscodeVideo, etc.) are
+# Native methods (Java_com_shaforostoff_..._nativeTranscodeMux, etc.) are
 # resolved by the static naming convention, so their class + names must survive.
 # The default proguard-android-optimize.txt keeps `native <methods>`, but we
 # pin the engine class explicitly to be safe.

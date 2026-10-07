@@ -23,7 +23,6 @@ import android.text.format.Formatter;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.IntentCompat;
 
-import com.shaforostoff.neonvideocompressor.Formats;
 import com.shaforostoff.neonvideocompressor.MainActivity;
 import com.shaforostoff.neonvideocompressor.OutputActions;
 import com.shaforostoff.neonvideocompressor.ProgressActivity;
@@ -35,6 +34,7 @@ import com.shaforostoff.neonvideocompressor.engine.Options;
 import com.shaforostoff.neonvideocompressor.engine.SourceMetadata;
 
 import java.util.ArrayList;
+import java.util.function.Consumer;
 
 /**
  * Foreground service that converts a queue of videos on a worker thread so it
@@ -68,7 +68,6 @@ public class ConversionService extends Service implements ConversionJob.Listener
         public long liveProcessedBytes; // estimated source bytes consumed so far (current file)
         public long liveOutputBytes;    // bytes written to the output so far (current file)
         public String message;
-        public Uri output;
 
         // Batch state
         public int batchIndex;         // 0-based index of the file being processed
@@ -98,10 +97,6 @@ public class ConversionService extends Service implements ConversionJob.Listener
             if (batchTotal <= 1) return overall;
             return Math.max(0f, Math.min(1f, (batchIndex + overall) / batchTotal));
         }
-    }
-
-    public interface UiCallback {
-        void onUpdate(Snapshot snapshot);
     }
 
     // Terminal snapshot of the last finished batch. The service stops itself
@@ -144,7 +139,6 @@ public class ConversionService extends Service implements ConversionJob.Listener
     private final Runnable resumeCheck = this::checkAutoResume;
 
     // Aggregated results across the batch (worker-thread only).
-    private Uri lastOutput;
     private String lastDisplayName;
     private String lastError;
     private long totalBytes;        // size of produced outputs
@@ -235,21 +229,10 @@ public class ConversionService extends Service implements ConversionJob.Listener
 
         boolean dwellOk = SystemClock.elapsedRealtime() - autoPauseAtMs >= MIN_PAUSE_MS;
         if (healthyStreak >= RESUME_STREAK && dwellOk) {
-            autoResume();
+            setPaused(false);
         } else {
             main.postDelayed(resumeCheck, RESUME_CHECK_MS);
         }
-    }
-
-    private void autoResume() {
-        synchronized (controlLock) {
-            if (control != null) control.setPaused(false);
-        }
-        autoPaused = false;
-        healthyStreak = 0;
-        snapshot.status = Status.RUNNING;
-        snapshot.lowMemoryPaused = false;
-        pushUpdate(true);
     }
 
     /** Cancel any pending auto-resume and drop the auto-pause classification. */
@@ -269,10 +252,8 @@ public class ConversionService extends Service implements ConversionJob.Listener
                 handleStart(intent);
                 break;
             case ACTION_PAUSE:
-                pause();
-                break;
             case ACTION_RESUME:
-                resume();
+                setPaused(action.equals(ACTION_PAUSE));
                 break;
             case ACTION_CANCEL:
                 cancel();
@@ -324,7 +305,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
             snapshot.lowMemoryPaused = false;
             main.post(this::clearMemoryGuard); // drop any stale auto-resume from the previous file
             currentInput = input;
-            currentInputBytes = queryUriSize(input);
+            currentInputBytes = SourceMetadata.querySize(this, input);
             pushUpdate(true);
 
             JobControl c = new JobControl();
@@ -378,13 +359,12 @@ public class ConversionService extends Service implements ConversionJob.Listener
         snapshot.succeeded++;
         snapshot.overall = 1f;
         if (partial) snapshot.partial = true;
-        lastOutput = output;
         lastDisplayName = displayName;
         if (output != null) {
             collectedOutputs.add(output); // worker thread only
             // A partial (stopped-early) output must never replace its original.
             collectedOutputSources.add(partial ? null : currentInput);
-            totalBytes += queryUriSize(output);
+            totalBytes += SourceMetadata.querySize(this, output);
             originalBytes += currentInputBytes;
         }
         pushUpdate(true);
@@ -424,14 +404,9 @@ public class ConversionService extends Service implements ConversionJob.Listener
         // Stats go on their own line below the headline, e.g.:
         //   Saved clip_hevc.mp4
         //   500 MB -> 145 MB · Avg speed: 1.85× realtime
-        String extra = "";
-        if (sizeText != null || avgSpeedText != null) {
-            StringBuilder sb = new StringBuilder("\n");
-            if (sizeText != null) sb.append(sizeText);
-            if (sizeText != null && avgSpeedText != null) sb.append(" · ");
-            if (avgSpeedText != null) sb.append(avgSpeedText);
-            extra = sb.toString();
-        }
+        String stats = sizeText != null && avgSpeedText != null ? sizeText + " · " + avgSpeedText
+                : sizeText != null ? sizeText : avgSpeedText;
+        String extra = stats != null ? "\n" + stats : "";
 
         Status finalStatus;
         String summary;
@@ -467,7 +442,6 @@ public class ConversionService extends Service implements ConversionJob.Listener
         snapshot.status = finalStatus;
         snapshot.overall = 1f;
         snapshot.message = summary;
-        snapshot.output = lastOutput;
         // Terminal, single write of the shared list before the final push; the UI
         // copies it defensively on receipt.
         snapshot.outputs.clear();
@@ -514,35 +488,24 @@ public class ConversionService extends Service implements ConversionJob.Listener
 
     // --- bound API ----------------------------------------------------------
 
-    private UiCallback uiCallback;
+    private Consumer<Snapshot> uiCallback;
 
-    public void setUiCallback(UiCallback cb) {
+    public void setUiCallback(Consumer<Snapshot> cb) {
         this.uiCallback = cb;
-        if (cb != null) {
-            final Snapshot s = snapshot;
-            main.post(() -> {
-                if (uiCallback != null) uiCallback.onUpdate(s);
-            });
-        }
+        if (cb != null) postToUi();
     }
 
-    public void pause() {
-        clearMemoryGuard(); // an explicit user pause is not auto-resumed
+    /**
+     * Pause or resume the current file. Also the memory guard's auto-resume; an
+     * explicit user pause is never auto-resumed, and a user resume cancels any
+     * pending auto-resume.
+     */
+    public void setPaused(boolean paused) {
+        clearMemoryGuard();
         synchronized (controlLock) {
             if (control != null) {
-                control.setPaused(true);
-                snapshot.status = Status.PAUSED;
-            }
-        }
-        pushUpdate(true);
-    }
-
-    public void resume() {
-        clearMemoryGuard(); // user override cancels any pending auto-resume
-        synchronized (controlLock) {
-            if (control != null) {
-                control.setPaused(false);
-                snapshot.status = Status.RUNNING;
+                control.setPaused(paused);
+                snapshot.status = paused ? Status.PAUSED : Status.RUNNING;
             }
         }
         pushUpdate(true);
@@ -578,16 +541,19 @@ public class ConversionService extends Service implements ConversionJob.Listener
 
     // --- updates / notifications -------------------------------------------
 
-    private void pushUpdate(boolean force) {
-        final Snapshot s = snapshot;
+    private void postToUi() {
         main.post(() -> {
-            if (uiCallback != null) uiCallback.onUpdate(s);
+            if (uiCallback != null) uiCallback.accept(snapshot);
         });
+    }
+
+    private void pushUpdate(boolean force) {
+        postToUi();
 
         long now = SystemClock.elapsedRealtime();
         if (force || now - lastNotifMs > 500) {
             lastNotifMs = now;
-            if (s.status == Status.RUNNING || s.status == Status.PAUSED) {
+            if (snapshot.status == Status.RUNNING || snapshot.status == Status.PAUSED) {
                 NotificationManager nm = getSystemService(NotificationManager.class);
                 if (nm != null) nm.notify(NOTIF_ID, buildProgressNotification());
             }
@@ -622,10 +588,10 @@ public class ConversionService extends Service implements ConversionJob.Listener
             title = getString(paused ? R.string.notif_title_single_paused : R.string.notif_title_single_converting);
         }
 
-        String text = getString(R.string.notif_text_format, Formats.phase(this, snapshot.phase), percent);
-        if (batch && snapshot.currentName != null) {
-            text = getString(R.string.notif_text_batch_format, snapshot.currentName, Formats.phase(this, snapshot.phase));
-        }
+        String phase = getString(snapshot.phase.label);
+        String text = batch && snapshot.currentName != null
+                ? getString(R.string.notif_text_batch_format, snapshot.currentName, phase)
+                : getString(R.string.notif_text_format, phase, percent);
 
         PendingIntent content = PendingIntent.getActivity(this, 0,
                 new Intent(this, ProgressActivity.class)
@@ -696,10 +662,6 @@ public class ConversionService extends Service implements ConversionJob.Listener
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
                         ? ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
                         : ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
-    }
-
-    private long queryUriSize(Uri uri) {
-        return SourceMetadata.querySize(this, uri);
     }
 
     private String queryName(Uri uri) {

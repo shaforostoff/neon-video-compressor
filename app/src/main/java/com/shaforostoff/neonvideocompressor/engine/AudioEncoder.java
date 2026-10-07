@@ -21,10 +21,6 @@ public final class AudioEncoder {
     public static final int RESULT_CANCELLED = 1;
     public static final int RESULT_NO_AUDIO = 2;
 
-    public interface Progress {
-        void onProgress(long processedUs);
-    }
-
     private static final long TIMEOUT_US = 10_000;
 
     /**
@@ -55,7 +51,8 @@ public final class AudioEncoder {
      * @param bitRate    target bitrate in bits/sec
      */
     public static int encode(FileDescriptor inFd, String outPath, int aacProfile,
-                             int bitRate, JobControl control, Progress progress)
+                             int bitRate, JobControl control,
+                             NativeConverter.ProgressCallback progress)
             throws IOException, InterruptedException {
 
         MediaExtractor extractor = new MediaExtractor();

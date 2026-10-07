@@ -25,17 +25,13 @@ public class JobControl {
     public void setPaused(boolean p) {
         paused = p;
         NativeConverter.nativeSetPaused(nativeHandle, p);
-        synchronized (lock) {
-            lock.notifyAll();
-        }
+        wake();
     }
 
     public void cancel() {
         cancelled = true;
         NativeConverter.nativeCancel(nativeHandle);
-        synchronized (lock) {
-            lock.notifyAll();
-        }
+        wake();
     }
 
     /**
@@ -45,6 +41,10 @@ public class JobControl {
     public void requestStop() {
         stopRequested = true;
         NativeConverter.nativeRequestStop(nativeHandle);
+        wake();
+    }
+
+    private void wake() {
         synchronized (lock) {
             lock.notifyAll();
         }

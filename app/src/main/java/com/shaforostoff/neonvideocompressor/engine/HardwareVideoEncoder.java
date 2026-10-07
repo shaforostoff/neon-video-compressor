@@ -26,22 +26,12 @@ import java.nio.ByteBuffer;
  * the source file directly, and interleaved into the same {@link MediaMuxer}.
  *
  * <p>Pause / cancel / graceful-stop are driven through the shared
- * {@link JobControl}, mirroring the native pass's semantics so the service and UI
- * treat both encoders identically.
+ * {@link JobControl}, and results use the native pass's {@code RET_*} codes, so
+ * the service and UI treat both encoders identically.
  */
 public final class HardwareVideoEncoder {
 
     private static final String TAG = "HardwareVideoEncoder";
-
-    public static final int RESULT_OK = 0;
-    /** Stopped early on request; the output holds the partial (playable) content. */
-    public static final int RESULT_STOPPED = 1;
-    public static final int RESULT_CANCELLED = 2;
-    public static final int RESULT_ERROR = 3;
-
-    public interface Progress {
-        void onProgress(long processedUs);
-    }
 
     private static final long TIMEOUT_US = 10_000;
     private static final int I_FRAME_INTERVAL_SEC = 2;
@@ -56,10 +46,12 @@ public final class HardwareVideoEncoder {
      * @param audioPath   path to a ready AAC file (from {@link AudioEncoder}), or null
      * @param audioCopyFd source fd whose first audio track is stream-copied, or null
      * @param maxDurationUs stop after this much source video (previews); 0 = whole file
+     * @return a {@link NativeConverter} {@code RET_*} code; {@code RET_STOPPED}
+     * means stopped early on request, the output holding the partial content
      */
     public static int encode(FileDescriptor videoFd, String audioPath, FileDescriptor audioCopyFd,
                              FileDescriptor outFd, Options options, JobControl control,
-                             long maxDurationUs, Progress progress) {
+                             long maxDurationUs, NativeConverter.ProgressCallback progress) {
         MediaExtractor audio = null;
         MediaMuxer muxer = null;
         try {
@@ -74,28 +66,10 @@ public final class HardwareVideoEncoder {
             return transcode(videoFd, muxer, audioSource, options, control, maxDurationUs, progress);
         } catch (Exception e) {
             Log.e(TAG, "encode failed", e);
-            return control.cancelled ? RESULT_CANCELLED : RESULT_ERROR;
+            return control.cancelled ? NativeConverter.RET_CANCELLED : NativeConverter.RET_ERROR;
         } finally {
             Quietly.release(muxer);
             Quietly.release(audio);
-        }
-    }
-
-    /**
-     * Video-only encode to a plain filesystem path — used for the preview clip so
-     * the A/B comparison reflects the real hardware encoder.
-     */
-    public static int encodeToPath(FileDescriptor videoFd, String outPath, Options options,
-                                   JobControl control, long maxDurationUs, Progress progress) {
-        MediaMuxer muxer = null;
-        try {
-            muxer = new MediaMuxer(outPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
-            return transcode(videoFd, muxer, null, options, control, maxDurationUs, progress);
-        } catch (Exception e) {
-            Log.e(TAG, "encodeToPath failed", e);
-            return control.cancelled ? RESULT_CANCELLED : RESULT_ERROR;
-        } finally {
-            Quietly.release(muxer);
         }
     }
 
@@ -103,13 +77,13 @@ public final class HardwareVideoEncoder {
 
     private static int transcode(FileDescriptor videoFd, MediaMuxer muxer, AudioSource audio,
                                  Options options, JobControl control, long maxDurationUs,
-                                 Progress progress) throws IOException {
+                                 NativeConverter.ProgressCallback progress) throws IOException {
         MediaExtractor video = new MediaExtractor();
         video.setDataSource(videoFd);
         int videoTrack = selectTrack(video, "video/");
         if (videoTrack < 0) {
             video.release();
-            return RESULT_ERROR;
+            return NativeConverter.RET_ERROR;
         }
         video.selectTrack(videoTrack);
         MediaFormat srcFormat = video.getTrackFormat(videoTrack);
@@ -152,7 +126,7 @@ public final class HardwareVideoEncoder {
         MediaCodec decoder = null;
         Surface inputSurface = null;
         boolean muxerStarted = false;
-        int result = RESULT_OK;
+        int result = NativeConverter.RET_OK;
         try {
             encoder = hw != null
                     ? MediaCodec.createByCodecName(hw.codecName())
@@ -181,7 +155,7 @@ public final class HardwareVideoEncoder {
             while (!encoderDone) {
                 control.waitIfPaused();
                 if (control.cancelled) {
-                    result = RESULT_CANCELLED;
+                    result = NativeConverter.RET_CANCELLED;
                     break;
                 }
                 // A graceful stop flows the same way as reaching the duration limit:
@@ -254,19 +228,21 @@ public final class HardwareVideoEncoder {
 
             // Flush any remaining audio. On a graceful stop keep only what lines up
             // with the encoded video; otherwise write it all out.
-            if (result == RESULT_OK && muxerStarted && !audioDone) {
+            if (result == NativeConverter.RET_OK && muxerStarted && !audioDone) {
                 long limit = control.stopRequested ? lastVideoPtsUs : Long.MAX_VALUE;
                 pumpAudio(muxer, muxAudioTrack, audio, limit);
             }
-            if (result == RESULT_OK && control.stopRequested) result = RESULT_STOPPED;
+            if (result == NativeConverter.RET_OK && control.stopRequested) {
+                result = NativeConverter.RET_STOPPED;
+            }
         } catch (Exception e) {
-            if (control.cancelled) result = RESULT_CANCELLED;
-            else if (result == RESULT_OK) {
+            if (control.cancelled) result = NativeConverter.RET_CANCELLED;
+            else if (result == NativeConverter.RET_OK) {
                 Log.e(TAG, "transcode failed (encoder="
                         + (hw != null ? hw.codecName() : "default")
                         + ", " + width + "x" + height + "@" + frameRate
                         + ", cq=" + (hw != null && hw.supportsCq()) + ")", e);
-                result = RESULT_ERROR;
+                result = NativeConverter.RET_ERROR;
             }
         } finally {
             // stop() finalizes the mp4 (writes the moov atom); releasing a started

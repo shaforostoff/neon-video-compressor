@@ -1,6 +1,7 @@
 package com.shaforostoff.neonvideocompressor.engine;
 
 import android.Manifest;
+import android.content.ContentUris;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.content.res.AssetFileDescriptor;
@@ -13,7 +14,10 @@ import android.provider.OpenableColumns;
 
 import androidx.core.content.ContextCompat;
 
-/** Reads display metadata from a source content Uri, regardless of which picker produced it. */
+/**
+ * Reads metadata from a source content Uri, and locates the MediaStore item
+ * behind it, regardless of which picker or app produced it.
+ */
 public final class SourceMetadata {
 
     // Duration reported by MediaMetadataRetriever vs MediaStore's stored column
@@ -26,9 +30,7 @@ public final class SourceMetadata {
      * "1000029282.mp4") rather than the real filename. {@link MediaStore#getMediaUri}
      * (API 33+) is the correct way to resolve it, but some OEM MediaProvider forks
      * throw for it; when that happens and the app holds video-library read
-     * permission, fall back to matching the item by exact file size + duration
-     * against {@code MediaStore.Video.Media} — bailing out (never guessing) if
-     * more than one row matches, since a wrong name is worse than a numeric one.
+     * permission, fall back to {@link #findMediaStoreVideo}.
      */
     public static String queryDisplayName(Context context, Uri uri) {
         Uri resolved = resolvePickerUri(context, uri);
@@ -37,8 +39,9 @@ public final class SourceMetadata {
             if (name != null) return name;
         }
 
-        if (isLocalPhotoPickerUri(uri) && hasVideoLibraryPermission(context)) {
-            String matched = matchBySizeAndDuration(context, uri);
+        if (isPhotoPickerUri(uri) && hasVideoLibraryPermission(context)) {
+            Uri match = findMediaStoreVideo(context, uri);
+            String matched = match != null ? queryOne(context, match) : null;
             if (matched != null) return matched;
         }
 
@@ -89,60 +92,66 @@ public final class SourceMetadata {
         return uri;
     }
 
-    private static boolean hasVideoLibraryPermission(Context context) {
+    /** Whether READ_MEDIA_VIDEO is granted (API 33+; always false below). */
+    public static boolean hasVideoLibraryPermission(Context context) {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                 && ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO)
                         == PackageManager.PERMISSION_GRANTED;
     }
 
     /**
-     * Matches the picker item against MediaStore.Video.Media by exact file size
-     * (a strong signal on its own) confirmed by duration within a small
-     * tolerance. Returns null on no match or on any ambiguity — a wrong name is
-     * worse than falling back to the numeric one.
+     * Locates the MediaStore video item behind a photo-picker or share-provider
+     * uri. The picker redacts DISPLAY_NAME (it returns "<pickerId>.mp4"), so a
+     * name lookup is useless — but for local items the picker id IS the
+     * MediaStore {@code _ID} (verified on Android 15), so try that first and
+     * sanity-check by SIZE. Otherwise match by exact SIZE (a strong signal on its
+     * own), narrowed by duration when several items share it. Returns null on no
+     * match or on any ambiguity: a wrong item is worse than none.
      */
-    private static String matchBySizeAndDuration(Context context, Uri pickerUri) {
-        long size = querySize(context, pickerUri);
-        if (size <= 0) return null;
-        long durationMs = queryDurationMs(context, pickerUri);
-
-        String[] projection = {
-                MediaStore.Video.Media.DISPLAY_NAME,
-                MediaStore.Video.Media.DURATION,
-        };
-        String selection = MediaStore.Video.Media.SIZE + "=?";
-        String[] selectionArgs = {String.valueOf(size)};
-
-        try (Cursor c = context.getContentResolver().query(
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI, projection, selection, selectionArgs, null)) {
-            if (c == null) return null;
-            int nameIdx = c.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME);
-            int durationIdx = c.getColumnIndex(MediaStore.Video.Media.DURATION);
-            if (nameIdx < 0) return null;
-
-            String bestName = null;
-            while (c.moveToNext()) {
-                if (durationMs > 0 && durationIdx >= 0) {
-                    long candidateDuration = c.getLong(durationIdx);
-                    if (Math.abs(candidateDuration - durationMs) > DURATION_TOLERANCE_MS) continue;
+    public static Uri findMediaStoreVideo(Context context, Uri uri) {
+        long size = querySize(context, uri);
+        Uri videos = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL);
+        try {
+            Uri candidate = ContentUris.withAppendedId(videos, ContentUris.parseId(uri));
+            try (Cursor c = context.getContentResolver().query(candidate,
+                    new String[]{MediaStore.MediaColumns.SIZE}, null, null, null)) {
+                if (c != null && c.moveToFirst() && (size <= 0 || c.getLong(0) == size)) {
+                    return candidate;
                 }
-                if (bestName != null) return null; // ambiguous — more than one plausible match
-                bestName = c.getString(nameIdx);
             }
-            return bestName;
+        } catch (Exception ignored) {
+        }
+
+        if (size <= 0) return null;
+        try (Cursor c = context.getContentResolver().query(videos,
+                new String[]{MediaStore.MediaColumns._ID, MediaStore.Video.Media.DURATION},
+                MediaStore.MediaColumns.SIZE + "=?", new String[]{String.valueOf(size)}, null)) {
+            if (c == null) return null;
+            // The duration is only needed, and only probed, to break a tie.
+            long durationMs = c.getCount() > 1 ? probeDurationAndBitrate(context, uri)[0] : 0;
+            Uri match = null;
+            while (c.moveToNext()) {
+                if (durationMs > 0
+                        && Math.abs(c.getLong(1) - durationMs) > DURATION_TOLERANCE_MS) continue;
+                if (match != null) return null; // ambiguous — more than one plausible match
+                match = ContentUris.withAppendedId(videos, c.getLong(0));
+            }
+            return match;
         } catch (Exception ignored) {
             return null;
         }
     }
 
-    private static long queryDurationMs(Context context, Uri uri) {
+    /** @return {@code {durationMs, bitrateBps}}; 0 for whatever the container doesn't report. */
+    public static long[] probeDurationAndBitrate(Context context, Uri uri) {
         MediaMetadataRetriever r = new MediaMetadataRetriever();
         try {
             r.setDataSource(context, uri);
-            String ms = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
-            return ms != null ? Long.parseLong(ms) : -1;
+            return new long[]{
+                    parseLongOrZero(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)),
+                    parseLongOrZero(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE))};
         } catch (Exception e) {
-            return -1;
+            return new long[]{0, 0};
         } finally {
             try {
                 r.release();
@@ -151,11 +160,21 @@ public final class SourceMetadata {
         }
     }
 
-    /** True for content://media/picker/<user>/<local-provider-authority>/media/<id>. */
-    private static boolean isLocalPhotoPickerUri(Uri uri) {
-        if (!"media".equals(uri.getAuthority())) return false;
-        java.util.List<String> segments = uri.getPathSegments();
-        return !segments.isEmpty() && "picker".equals(segments.get(0));
+    private static long parseLongOrZero(String s) {
+        try {
+            return s != null ? Long.parseLong(s) : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * True for photo-picker uris: content://media/picker/... and
+     * content://media/picker_get_content/....
+     */
+    public static boolean isPhotoPickerUri(Uri uri) {
+        String path = uri.getPath();
+        return "media".equals(uri.getAuthority()) && path != null && path.startsWith("/picker");
     }
 
     private SourceMetadata() {

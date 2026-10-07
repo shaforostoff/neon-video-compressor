@@ -30,6 +30,7 @@ import com.shaforostoff.neonvideocompressor.engine.Options;
 import com.shaforostoff.neonvideocompressor.engine.Quietly;
 
 import java.io.File;
+import java.io.IOException;
 
 /**
  * Encodes the first few seconds of the selected video with the current options,
@@ -110,6 +111,9 @@ public class PreviewActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         setContentView(R.layout.activity_preview);
+        // Set before any early finish(): onDestroy deletes them.
+        encodedFile = new File(getCacheDir(), "preview_encoded.mp4");
+        originalFile = new File(getCacheDir(), "preview_original.mp4");
 
         inputUri = getIntent().getParcelableExtra(EXTRA_URI);
         options = IntentCompat.getParcelableExtra(getIntent(), EXTRA_OPTIONS, Options.class);
@@ -121,9 +125,6 @@ public class PreviewActivity extends AppCompatActivity {
         // CRF, not visual quality — so previewing always uses the fastest preset
         // to keep the wait short; the real conversion still honors the user's pick.
         options.preset = "ultrafast";
-
-        encodedFile = new File(getCacheDir(), "preview_encoded.mp4");
-        originalFile = new File(getCacheDir(), "preview_original.mp4");
 
         texEncoded = findViewById(R.id.texEncoded);
         texOriginal = findViewById(R.id.texOriginal);
@@ -224,14 +225,16 @@ public class PreviewActivity extends AppCompatActivity {
         synchronized (ctrlLock) {
             ctrl = c;
         }
-        ParcelFileDescriptor encPfd = null, copyPfd = null;
+        ParcelFileDescriptor inPfd = null;
         try {
-            encPfd = getContentResolver().openFileDescriptor(inputUri, "r");
-            if (encPfd == null) {
+            inPfd = getContentResolver().openFileDescriptor(inputUri, "r");
+            if (inPfd == null) {
                 fail();
                 return;
             }
-            int fd = encPfd.getFd();
+            // Shared by every pass below: the native readers use pread and the
+            // hardware pass's MediaExtractor is released before the next one.
+            int fd = inPfd.getFd();
 
             long[] probe = NativeConverter.nativeProbe(fd);
             vidW = (int) probe[2];
@@ -243,32 +246,24 @@ public class PreviewActivity extends AppCompatActivity {
                 main.post(() -> loadingBar.setProgress(pct));
             };
             int r1;
-            if (options.encodesVideoHardware()) {
-                int hw = HardwareVideoEncoder.encodeToPath(
-                        encPfd.getFileDescriptor(), encodedFile.getAbsolutePath(),
-                        options, c, PREVIEW_US, previewProgress::onProgress);
-                // A partial (stop-truncated) preview is still a valid clip to show.
-                r1 = (hw == HardwareVideoEncoder.RESULT_OK
-                        || hw == HardwareVideoEncoder.RESULT_STOPPED)
-                        ? NativeConverter.RET_OK : NativeConverter.RET_ERROR;
-            } else {
-                r1 = NativeConverter.nativeTranscodeVideo(
-                        fd, encodedFile.getAbsolutePath(), options.crf, options.preset,
-                        c.nativeHandle(), PREVIEW_US, previewProgress);
+            try (ParcelFileDescriptor out = openForWriting(encodedFile)) {
+                r1 = options.encodesVideoHardware()
+                        ? HardwareVideoEncoder.encode(inPfd.getFileDescriptor(), null, null,
+                                out.getFileDescriptor(), options, c, PREVIEW_US, previewProgress)
+                        : NativeConverter.nativeTranscodeMux(fd, -1, out.getFd(), options.crf,
+                                options.preset, c.nativeHandle(), PREVIEW_US, previewProgress);
             }
             if (c.cancelled || destroyed) return;
-            if (r1 != NativeConverter.RET_OK) {
+            // A partial (stop-truncated) preview is still a valid clip to show.
+            if (r1 != NativeConverter.RET_OK && r1 != NativeConverter.RET_STOPPED) {
                 fail();
                 return;
             }
 
-            copyPfd = getContentResolver().openFileDescriptor(inputUri, "r");
-            if (copyPfd == null) {
-                fail();
-                return;
+            int r2;
+            try (ParcelFileDescriptor out = openForWriting(originalFile)) {
+                r2 = NativeConverter.nativeRemux(fd, -1, out.getFd(), PREVIEW_US);
             }
-            int r2 = NativeConverter.nativeCopyClip(
-                    copyPfd.getFd(), originalFile.getAbsolutePath(), PREVIEW_US);
             if (destroyed) return;
             if (r2 != NativeConverter.RET_OK) {
                 fail();
@@ -288,9 +283,14 @@ public class PreviewActivity extends AppCompatActivity {
                 c.destroy();
                 if (ctrl == c) ctrl = null;
             }
-            Quietly.close(encPfd);
-            Quietly.close(copyPfd);
+            Quietly.close(inPfd);
         }
+    }
+
+    /** A fresh (truncated) read-write fd: the muxers seek back and +faststart re-reads. */
+    private static ParcelFileDescriptor openForWriting(File file) throws IOException {
+        return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_WRITE
+                | ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE);
     }
 
     private void fail() {
@@ -424,18 +424,15 @@ public class PreviewActivity extends AppCompatActivity {
         if (vw == 0 || vh == 0) return;
 
         boolean swap = (rotationDeg == 90 || rotationDeg == 270);
-        float dispW = swap ? vidH : vidW; // true (post-rotation) display size
-        float dispH = swap ? vidW : vidH;
+        float[] fit = fittedSize(tv);
+        float fw = fit[0]; // on-screen video width
+        float fh = fit[1]; // on-screen video height
 
         // Did the player already rotate the frame? For a 90/270 source that shows
         // up as MediaPlayer reporting a size whose orientation matches the display
         // orientation rather than the (opposite) coded orientation.
         boolean playerRotated = swap && reportedW > 0 && reportedH > 0
-                && (reportedW < reportedH) == (dispW < dispH);
-
-        float scale = Math.min(vw / dispW, vh / dispH);
-        float fw = dispW * scale; // on-screen video width
-        float fh = dispH * scale; // on-screen video height
+                && (reportedW < reportedH) == (fw < fh);
 
         float cx = vw / 2f, cy = vh / 2f;
         Matrix m = new Matrix();
@@ -461,11 +458,11 @@ public class PreviewActivity extends AppCompatActivity {
         applyTransform(texOriginal);
     }
 
-    /** On-screen size (before zoom) of the letterboxed video, per applyTransform's fit math. */
-    private float[] fittedSize() {
-        int vw = texEncoded.getWidth(), vh = texEncoded.getHeight();
+    /** On-screen size (before zoom) of the video letterboxed into {@code tv}. */
+    private float[] fittedSize(TextureView tv) {
+        int vw = tv.getWidth(), vh = tv.getHeight();
         boolean swap = (rotationDeg == 90 || rotationDeg == 270);
-        float dispW = swap ? vidH : vidW;
+        float dispW = swap ? vidH : vidW; // true (post-rotation) display size
         float dispH = swap ? vidW : vidH;
         float scale = Math.min(vw / dispW, vh / dispH);
         return new float[]{dispW * scale, dispH * scale};
@@ -507,7 +504,7 @@ public class PreviewActivity extends AppCompatActivity {
     private void clampPan() {
         int vw = texEncoded.getWidth(), vh = texEncoded.getHeight();
         if (vw == 0 || vh == 0 || vidW <= 0 || vidH <= 0) return;
-        float[] fit = fittedSize();
+        float[] fit = fittedSize(texEncoded);
         float maxPanX = Math.max(0f, (fit[0] * zoomScale - vw) / 2f);
         float maxPanY = Math.max(0f, (fit[1] * zoomScale - vh) / 2f);
         panX = Math.max(-maxPanX, Math.min(maxPanX, panX));
@@ -519,14 +516,9 @@ public class PreviewActivity extends AppCompatActivity {
         preparedCount = 0;
         playersStarted = false;
         showingOriginal = false;
-        if (mpEncoded != null) {
-            try { mpEncoded.release(); } catch (Exception ignored) {}
-            mpEncoded = null;
-        }
-        if (mpOriginal != null) {
-            try { mpOriginal.release(); } catch (Exception ignored) {}
-            mpOriginal = null;
-        }
+        Quietly.release(mpEncoded);
+        Quietly.release(mpOriginal);
+        mpEncoded = mpOriginal = null;
     }
 
     // --- lifecycle ----------------------------------------------------------

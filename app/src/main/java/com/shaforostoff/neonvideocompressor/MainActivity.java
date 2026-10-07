@@ -4,7 +4,6 @@ import android.Manifest;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -190,14 +189,12 @@ public class MainActivity extends AppCompatActivity {
         // Show the video encode controls (and pick the right quality scale) for the
         // selected mode; only the encode modes have any.
         spVideoMode.setOnItemSelectedListener(new SimpleSelected(this::applyVideoModeUi));
-        // Audio encode options (bitrate) are relevant only for the encode modes (pos 0/1/2).
-        spAudioMode.setOnItemSelectedListener(new SimpleSelected(pos ->
-                audioEncodeOptions.setVisibility(pos <= 2 ? View.VISIBLE : View.GONE)));
+        // Audio encode options (bitrate) are relevant only for the encode modes.
+        spAudioMode.setOnItemSelectedListener(new SimpleSelected(this::applyAudioModeUi));
         // Apply the restored selections' visibility immediately (a listener added
         // after setSelection doesn't get called for the already-set value).
-        applyVideoModeUi(spVideoMode.getSelectedItemPosition());
-        audioEncodeOptions.setVisibility(
-                spAudioMode.getSelectedItemPosition() <= 2 ? View.VISIBLE : View.GONE);
+        applyVideoModeUi();
+        applyAudioModeUi();
 
         seekCrf.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
@@ -219,7 +216,7 @@ public class MainActivity extends AppCompatActivity {
         bitrateModeGroup.setOnCheckedChangeListener((group, checkedId) -> {
             hwVbr = checkedId == R.id.rbVbr;
             // Switch the slider to the newly-selected mode's own remembered bitrate.
-            applyVideoModeUi(spVideoMode.getSelectedItemPosition());
+            applyVideoModeUi();
         });
 
         ((MaterialButton) findViewById(R.id.btnSelectVideos)).setOnClickListener(v -> onSelectVideosClicked());
@@ -356,7 +353,7 @@ public class MainActivity extends AppCompatActivity {
         // Unknown until the background probe lands; the slider falls back to its
         // fixed ceiling until then, and probeSelection() re-applies the real cap.
         sourceBitrateBps = 0;
-        applyVideoModeUi(spVideoMode.getSelectedItemPosition());
+        applyVideoModeUi();
         renderSelection();
     }
 
@@ -367,8 +364,7 @@ public class MainActivity extends AppCompatActivity {
             // display name and duration when the background probe returns.
             txtFile.setText(selectedUris.get(0).getLastPathSegment());
         } else if (!selectedUris.isEmpty()) {
-            txtFile.setText(String.format(Locale.US,
-                    getString(R.string.videos_selected), selectedUris.size()));
+            txtFile.setText(getString(R.string.videos_selected, selectedUris.size()));
         } else {
             txtFile.setText(R.string.no_file_selected);
         }
@@ -405,7 +401,7 @@ public class MainActivity extends AppCompatActivity {
             if (single) {
                 Uri uri = uris.get(0);
                 String name = SourceMetadata.queryDisplayName(this, uri);
-                long[] durationAndRate = probeDurationAndBitrate(uri);
+                long[] durationAndRate = SourceMetadata.probeDurationAndBitrate(this, uri);
                 long durationMs = durationAndRate[0];
                 bps = (int) durationAndRate[1];
 
@@ -433,40 +429,15 @@ public class MainActivity extends AppCompatActivity {
                 // going above it cannot add quality.
                 if (fBps > 0 && fBps != sourceBitrateBps) {
                     sourceBitrateBps = fBps;
-                    applyVideoModeUi(spVideoMode.getSelectedItemPosition());
+                    applyVideoModeUi();
                 }
             });
         }, "selection-meta").start();
     }
 
-    /** @return {@code {durationMs, bitrateBps}}; 0 for whatever the container doesn't report. */
-    private long[] probeDurationAndBitrate(Uri uri) {
-        MediaMetadataRetriever r = new MediaMetadataRetriever();
-        try {
-            r.setDataSource(this, uri);
-            return new long[]{
-                    parseLongOrZero(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)),
-                    parseLongOrZero(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE))};
-        } catch (Exception e) {
-            return new long[]{0, 0};
-        } finally {
-            try { r.release(); } catch (Exception ignored) {}
-        }
-    }
-
-    private static long parseLongOrZero(String s) {
-        if (s == null) return 0;
-        try {
-            return Long.parseLong(s);
-        } catch (NumberFormatException e) {
-            return 0;
-        }
-    }
-
     private void onSelectVideosClicked() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-                && ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO)
-                != PackageManager.PERMISSION_GRANTED) {
+                && !SourceMetadata.hasVideoLibraryPermission(this)) {
             videoLibraryPermission.launch(Manifest.permission.READ_MEDIA_VIDEO);
         } else {
             launchVideoPicker();
@@ -499,13 +470,7 @@ public class MainActivity extends AppCompatActivity {
         o.hwQuality = hwQuality;
         o.hwBitrate = Math.max(HW_BITRATE_MIN_BPS, activeHwBitrate());
         o.hwBitrateMode = hwVbr ? Options.HwBitrateMode.VBR : Options.HwBitrateMode.CBR;
-        switch (spAudioMode.getSelectedItemPosition()) {
-            case 0: o.audioMode = Options.AudioMode.ENCODE_AAC_LC; break;
-            case 1: o.audioMode = Options.AudioMode.ENCODE_AAC_HE; break;
-            case 2: o.audioMode = Options.AudioMode.ENCODE_AAC_HE_V2; break;
-            case 3: o.audioMode = Options.AudioMode.COPY; break;
-            default: o.audioMode = Options.AudioMode.REMOVE; break;
-        }
+        o.audioMode = currentAudioMode();
         o.audioBitrate = bitrateValues[spAudioBitrate.getSelectedItemPosition()];
         return o;
     }
@@ -626,6 +591,14 @@ public class MainActivity extends AppCompatActivity {
                 ? Options.VideoMode.ENCODE_HEVC_HW : Options.VideoMode.ENCODE_HEVC;
     }
 
+    private Options.AudioMode currentAudioMode() {
+        return Options.AudioMode.values()[spAudioMode.getSelectedItemPosition()];
+    }
+
+    private void applyAudioModeUi() {
+        audioEncodeOptions.setVisibility(currentAudioMode().encodes() ? View.VISIBLE : View.GONE);
+    }
+
     private Options.VideoMode currentVideoMode() {
         int pos = spVideoMode.getSelectedItemPosition();
         return pos >= 0 && pos < videoModes.size()
@@ -633,9 +606,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /** Shows/hides the encode controls and picks the quality scale for the mode. */
-    private void applyVideoModeUi(int pos) {
-        Options.VideoMode mode = pos >= 0 && pos < videoModes.size()
-                ? videoModes.get(pos) : Options.VideoMode.ENCODE_HEVC;
+    private void applyVideoModeUi() {
+        Options.VideoMode mode = currentVideoMode();
         boolean x265 = mode == Options.VideoMode.ENCODE_HEVC;
         boolean hw = mode == Options.VideoMode.ENCODE_HEVC_HW;
 
@@ -686,17 +658,14 @@ public class MainActivity extends AppCompatActivity {
     private void updateQualityLabel() {
         if (currentVideoMode() == Options.VideoMode.ENCODE_HEVC_HW) {
             if (hwUsesCq()) {
-                txtCrf.setText(String.format(Locale.US,
-                        getString(R.string.hw_quality_label), seekCrf.getProgress()));
+                txtCrf.setText(getString(R.string.hw_quality_label, seekCrf.getProgress()));
             } else {
                 double mbps = Math.max(1, seekCrf.getProgress()) * HW_BITRATE_STEP_BPS / 1_000_000.0;
-                txtCrf.setText(String.format(Locale.US,
-                        getString(R.string.hw_bitrate_label),
+                txtCrf.setText(getString(R.string.hw_bitrate_label,
                         String.format(Locale.US, "%.1f", mbps)));
             }
         } else {
-            txtCrf.setText(String.format(Locale.US,
-                    getString(R.string.crf_label), seekCrf.getProgress()));
+            txtCrf.setText(getString(R.string.crf_label, seekCrf.getProgress()));
         }
     }
 
@@ -711,12 +680,11 @@ public class MainActivity extends AppCompatActivity {
     /** Minimal OnItemSelectedListener wrapper. */
     private static final class SimpleSelected
             implements android.widget.AdapterView.OnItemSelectedListener {
-        interface Cb { void onPos(int pos); }
-        private final Cb cb;
-        SimpleSelected(Cb cb) { this.cb = cb; }
+        private final Runnable cb;
+        SimpleSelected(Runnable cb) { this.cb = cb; }
         @Override
         public void onItemSelected(android.widget.AdapterView<?> p, View v, int pos, long id) {
-            cb.onPos(pos);
+            cb.run();
         }
         @Override public void onNothingSelected(android.widget.AdapterView<?> p) {}
     }

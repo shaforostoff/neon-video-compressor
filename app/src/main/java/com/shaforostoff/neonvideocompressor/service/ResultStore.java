@@ -2,9 +2,10 @@ package com.shaforostoff.neonvideocompressor.service;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.database.Cursor;
 import android.net.Uri;
-import android.provider.OpenableColumns;
+import android.text.TextUtils;
+
+import com.shaforostoff.neonvideocompressor.engine.SourceMetadata;
 
 import java.util.ArrayList;
 
@@ -29,7 +30,6 @@ public final class ResultStore {
     private static final String KEY_ACKED = "acknowledged";
     private static final String KEY_MESSAGE = "message";
     private static final String KEY_AUDIO_ONLY = "audio_only";
-    private static final String KEY_PARTIAL = "partial";
     private static final String KEY_BATCH_TOTAL = "batch_total";
     private static final String KEY_INPUT_URI = "input_uri";
     private static final String KEY_OUTPUTS = "outputs"; // '\n'-joined uri strings
@@ -50,28 +50,21 @@ public final class ResultStore {
             clear(ctx);
             return;
         }
-        StringBuilder joined = new StringBuilder();
-        for (Uri u : s.outputs) {
-            if (joined.length() > 0) joined.append('\n');
-            joined.append(u.toString());
-        }
         // Parallel source list, aligned 1:1 with outputs ("-" for none/partial).
-        StringBuilder sources = new StringBuilder();
+        ArrayList<String> sources = new ArrayList<>();
         for (int i = 0; i < s.outputs.size(); i++) {
-            if (i > 0) sources.append('\n');
             Uri src = i < s.outputSources.size() ? s.outputSources.get(i) : null;
-            sources.append(src != null ? src.toString() : NO_SOURCE);
+            sources.add(src != null ? src.toString() : NO_SOURCE);
         }
         prefs(ctx).edit()
                 .putBoolean(KEY_PRESENT, true)
                 .putBoolean(KEY_ACKED, false)
                 .putString(KEY_MESSAGE, s.message)
                 .putBoolean(KEY_AUDIO_ONLY, s.audioOnly)
-                .putBoolean(KEY_PARTIAL, s.partial)
                 .putInt(KEY_BATCH_TOTAL, Math.max(1, s.batchTotal))
                 .putString(KEY_INPUT_URI, s.inputUri != null ? s.inputUri.toString() : null)
-                .putString(KEY_OUTPUTS, joined.toString())
-                .putString(KEY_OUTPUT_SOURCES, sources.toString())
+                .putString(KEY_OUTPUTS, TextUtils.join("\n", s.outputs))
+                .putString(KEY_OUTPUT_SOURCES, TextUtils.join("\n", sources))
                 .apply();
     }
 
@@ -109,7 +102,8 @@ public final class ResultStore {
                 if (!part.isEmpty()) outputs.add(Uri.parse(part));
             }
         }
-        if (outputs.isEmpty() || !uriResolves(ctx, outputs.get(0))) {
+        // The output must still exist (the user may have deleted it meanwhile).
+        if (outputs.isEmpty() || SourceMetadata.querySize(ctx, outputs.get(0)) <= 0) {
             clear(ctx);
             return null;
         }
@@ -119,42 +113,18 @@ public final class ResultStore {
         s.overall = 1f;
         s.message = p.getString(KEY_MESSAGE, null);
         s.audioOnly = p.getBoolean(KEY_AUDIO_ONLY, false);
-        s.partial = p.getBoolean(KEY_PARTIAL, false);
         s.batchTotal = p.getInt(KEY_BATCH_TOTAL, 1);
         s.batchIndex = Math.max(0, s.batchTotal - 1); // completed: forces 100%
         String input = p.getString(KEY_INPUT_URI, null);
         s.inputUri = input != null ? Uri.parse(input) : null;
-        s.output = outputs.get(0);
         s.outputs.addAll(outputs);
 
-        // Rebuild the per-output source list. Fall back gracefully for records
-        // written before this key existed (single file -> derive from inputUri).
-        String srcJoined = p.getString(KEY_OUTPUT_SOURCES, null);
-        if (srcJoined != null && !srcJoined.isEmpty()) {
-            String[] parts = srcJoined.split("\n", -1);
-            if (parts.length == outputs.size()) {
-                for (String part : parts) {
-                    s.outputSources.add(NO_SOURCE.equals(part) || part.isEmpty()
-                            ? null : Uri.parse(part));
-                }
-            }
-        }
-        if (s.outputSources.isEmpty()) {
-            for (int i = 0; i < outputs.size(); i++) {
-                s.outputSources.add(i == 0 && outputs.size() == 1 && !s.partial
-                        ? s.inputUri : null);
-            }
+        // Rebuild the per-output source list; a malformed one offers no Replace.
+        String[] parts = p.getString(KEY_OUTPUT_SOURCES, "").split("\n", -1);
+        for (int i = 0; i < outputs.size(); i++) {
+            String part = parts.length == outputs.size() ? parts[i] : NO_SOURCE;
+            s.outputSources.add(NO_SOURCE.equals(part) || part.isEmpty() ? null : Uri.parse(part));
         }
         return s;
-    }
-
-    /** Whether a content Uri still points at a live item. */
-    private static boolean uriResolves(Context ctx, Uri uri) {
-        try (Cursor c = ctx.getContentResolver().query(
-                uri, new String[]{OpenableColumns.SIZE}, null, null, null)) {
-            return c != null && c.moveToFirst();
-        } catch (Exception e) {
-            return false;
-        }
     }
 }

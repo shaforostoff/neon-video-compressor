@@ -6,6 +6,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 
+import com.shaforostoff.neonvideocompressor.engine.MediaStoreOutput;
+
 import java.util.ArrayList;
 
 /**
@@ -24,14 +26,10 @@ public final class OutputActions {
     private OutputActions() {
     }
 
-    private static String mime(boolean audioOnly) {
-        return audioOnly ? "audio/mp4" : "video/mp4";
-    }
-
     /** ACTION_VIEW for a single output (single file, or the first file of a batch). */
     public static Intent view(Uri uri, boolean audioOnly) {
         return new Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, mime(audioOnly))
+                .setDataAndType(uri, MediaStoreOutput.mimeType(audioOnly))
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
     }
 
@@ -41,7 +39,7 @@ public final class OutputActions {
         if (uris.size() == 1) {
             send = new Intent(Intent.ACTION_SEND)
                     .putExtra(Intent.EXTRA_STREAM, uris.get(0))
-                    .setType(mime(audioOnly));
+                    .setType(MediaStoreOutput.mimeType(audioOnly));
         } else {
             send = new Intent(Intent.ACTION_SEND_MULTIPLE)
                     .putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
