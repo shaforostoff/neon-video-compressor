@@ -1,5 +1,6 @@
 package com.shaforostoff.neonvideocompressor;
 
+import android.Manifest;
 import android.app.PendingIntent;
 import android.app.RecoverableSecurityException;
 import android.content.ActivityNotFoundException;
@@ -8,6 +9,7 @@ import android.content.ContentUris;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
@@ -33,6 +35,7 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.IntentSenderRequest;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -130,6 +133,13 @@ public class ProgressActivity extends AppCompatActivity {
                 pendingReplace.clear();
                 finishReplace();
             });
+
+    // A shared video (e.g. from Google Photos) arrives without library access,
+    // so the original can't be read to name it or to put the output in its
+    // folder. Ask once on Replace; continue whatever the answer.
+    private final ActivityResultLauncher<String> libraryPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(),
+                    granted -> confirmReplace());
 
     // API 29: consent is per-file; on grant, re-issue that delete and continue.
     private final ActivityResultLauncher<IntentSenderRequest> singleDeleteLauncher =
@@ -240,7 +250,13 @@ public class ProgressActivity extends AppCompatActivity {
             startActivity(OutputActions.share(this, resultOutputs, resultAudioOnly,
                     getString(R.string.share_via)));
         });
-        btnReplace.setOnClickListener(v -> confirmReplace());
+        btnReplace.setOnClickListener(v -> {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasVideoLibraryPermission()) {
+                libraryPermissionLauncher.launch(Manifest.permission.READ_MEDIA_VIDEO);
+            } else {
+                confirmReplace();
+            }
+        });
 
         // Restore cached results so Open/Share work after a rotation at DONE even
         // if the service has already stopped and the rebind finds it gone.
@@ -459,10 +475,11 @@ public class ProgressActivity extends AppCompatActivity {
         if (count == 0) return;
         String title, message;
         if (count == 1) {
-            // Picker uris redact the display name; resolve the real item for a
-            // recognizable name in the dialog.
+            // Picker / share-provider uris may redact the display name; resolve
+            // the real item for a recognizable name in the dialog.
             Uri src = firstReplaceableSource();
-            Uri nameSource = src != null && isPhotoPickerUri(src) ? findMediaStoreUri(src) : src;
+            Uri media = src != null ? resolveToMediaUri(src) : null;
+            Uri nameSource = media != null ? media : src;
             String name = nameSource != null ? queryDisplayName(nameSource) : null;
             title = getString(R.string.replace_confirm_title);
             message = getString(R.string.replace_confirm_message,
@@ -490,8 +507,7 @@ public class ProgressActivity extends AppCompatActivity {
         for (int i = 0; i < resultOutputs.size(); i++) {
             Uri source = i < resultOutputSources.size() ? resultOutputSources.get(i) : null;
             if (source == null) continue;
-            Uri media = resolveToMediaUri(source);
-            if (media == null) {
+            Uri media = resolveToMediaUri(source);            if (media == null) {
                 deleteSafDocument(source, i);
                 continue;
             }
@@ -577,10 +593,43 @@ public class ProgressActivity extends AppCompatActivity {
                 }
             }
             if (isPhotoPickerUri(uri)) return findMediaStoreUri(uri);
-            return uri; // already a MediaStore item
+            if (MediaStore.AUTHORITY.equals(uri.getAuthority())) return uri; // already a MediaStore item
+            // Another app's provider (e.g. Google Photos share): createDeleteRequest
+            // only takes MediaStore ID uris, so find the item behind it.
+            Uri embedded = findEmbeddedMediaUri(uri);
+            return embedded != null ? embedded : findMediaStoreUri(uri);
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * Some share providers carry the MediaStore uri inside their own, e.g. Google
+     * Photos: {@code content://com.google.android.apps.photos.contentprovider/-1/2/
+     * content%3A%2F%2Fmedia%2Fexternal%2Fvideo%2Fmedia%2F1000032771/REQUIRE_ORIGINAL/...}.
+     * Returns that uri if it names an existing item (or can't be checked).
+     */
+    private Uri findEmbeddedMediaUri(Uri uri) {
+        for (String segment : uri.getPathSegments()) {
+            if (!segment.startsWith("content://" + MediaStore.AUTHORITY + "/")) continue;
+            Uri candidate = Uri.parse(segment);
+            try (Cursor c = getContentResolver().query(candidate,
+                    new String[]{MediaStore.MediaColumns._ID}, null, null, null)) {
+                if (c != null && c.moveToFirst()) return candidate;
+            } catch (Exception ignored) {
+            }
+            // Unreadable without library access: trust the provider's uri. The
+            // system delete dialog still shows the user which item goes.
+            if (!hasVideoLibraryPermission()) return candidate;
+        }
+        return null;
+    }
+
+    private boolean hasVideoLibraryPermission() {
+        String perm = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                ? Manifest.permission.READ_MEDIA_VIDEO
+                : Manifest.permission.READ_EXTERNAL_STORAGE;
+        return ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED;
     }
 
     private static final String TAG_REPLACE = "ReplaceOriginal";
