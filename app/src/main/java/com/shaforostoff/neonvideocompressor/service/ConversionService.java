@@ -60,7 +60,8 @@ public class ConversionService extends Service implements ConversionJob.Listener
 
     /** Immutable snapshot of progress, delivered to the bound UI. */
     public static final class Snapshot {
-        public Status status = Status.IDLE;
+        // Volatile and written last on finish: a reader that sees DONE also sees the outputs.
+        public volatile Status status = Status.IDLE;
         public ConversionJob.Phase phase = ConversionJob.Phase.PROBING;
         public long processedUs;
         public long durationUs;
@@ -463,15 +464,16 @@ public class ConversionService extends Service implements ConversionJob.Listener
             summary = getString(R.string.summary_partial, ok, total, bad) + extra;
         }
 
-        snapshot.status = finalStatus;
-        snapshot.overall = 1f;
-        snapshot.message = summary;
-        // Terminal, single write of the shared list before the final push; the UI
-        // copies it defensively on receipt.
+        // Terminal, single write of the shared lists before the final push; the UI
+        // copies them defensively on receipt. They are filled before the status
+        // flips, so a render that sees DONE never sees them still empty.
         snapshot.outputs.clear();
         snapshot.outputs.addAll(collectedOutputs);
         snapshot.outputSources.clear();
         snapshot.outputSources.addAll(collectedOutputSources);
+        snapshot.overall = 1f;
+        snapshot.message = summary;
+        snapshot.status = finalStatus;
 
         lastTerminal = snapshot;
         // Durable copy so the finished screen (Open/Share/Replace) survives the

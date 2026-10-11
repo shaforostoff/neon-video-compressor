@@ -304,25 +304,34 @@ public class ProgressActivity extends AppCompatActivity {
                 }
                 break;
             case DONE:
-                // The user is now looking at the finished screen — mark the durable
-                // result seen so it is not auto-reopened on the next launch.
-                ResultStore.markAcknowledged(this);
-                // Cache outputs (defensive copy off the shared Snapshot) and offer
-                // Open/Share — covers full and partial success.
-                resultOutputs.clear();
-                resultOutputs.addAll(s.outputs);
-                resultOutputSources.clear();
-                resultOutputSources.addAll(s.outputSources);
-                resultAudioOnly = s.audioOnly;
-                resultInputUri = s.inputUri;
+                // DONE is rendered again on every rebind / terminal fallback (e.g.
+                // back from Open or Share). Only the first one adopts the results
+                // and runs the one-time side effects: re-adopting would undo a
+                // Replace already done (stale output and source uris).
+                boolean first = !finishedState;
+                if (first) {
+                    // The user is now looking at the finished screen — mark the durable
+                    // result seen so it is not auto-reopened on the next launch.
+                    ResultStore.markAcknowledged(this);
+                    // Cache outputs (defensive copy off the shared Snapshot) and offer
+                    // Open/Share — covers full and partial success.
+                    resultOutputs.clear();
+                    resultOutputs.addAll(s.outputs);
+                    resultOutputSources.clear();
+                    resultOutputSources.addAll(s.outputSources);
+                    resultAudioOnly = s.audioOnly;
+                    resultInputUri = s.inputUri;
+                }
                 showTerminalState();
                 txtPhase.setText(batch ? R.string.batch_complete : R.string.done);
                 txtTime.setText(s.message != null ? s.message : "");
                 String savedTo = getString(s.audioOnly ? R.string.saved_to_music : R.string.saved_to_movies);
                 txtSpeed.setText(savedTo);
-                showBitrateComparison();
-                Toast.makeText(this, s.message != null ? s.message : savedTo,
-                        Toast.LENGTH_LONG).show();
+                if (first) {
+                    showBitrateComparison();
+                    Toast.makeText(this, s.message != null ? s.message : savedTo,
+                            Toast.LENGTH_LONG).show();
+                }
                 break;
             case ERROR:
                 showTerminalState();
