@@ -134,6 +134,8 @@ public class ConversionService extends Service implements ConversionJob.Listener
     private static final int RESUME_STREAK = 2;         // consecutive healthy polls to resume
     private static final long MIN_PAUSE_MS = 8000;      // minimum time to stay paused
     private static final float RESUME_MULT = 2.0f;      // availMem must exceed threshold*this
+    private static final long LOW_MEM_POLL_MS = 3000;   // poll cadence while encoding video
+    private long lastLowMemPollMs;     // worker thread only
     private boolean autoPaused;        // current pause was forced by this guard
     private long autoPauseAtMs;
     private int healthyStreak;
@@ -188,6 +190,27 @@ public class ConversionService extends Service implements ConversionJob.Listener
     }
 
     /**
+     * Android 14+ no longer delivers RUNNING_LOW / RUNNING_CRITICAL to
+     * {@link #onTrimMemory}, so while video is encoding the worker also polls
+     * device memory every few seconds and pauses when the system reports it low.
+     */
+    private void pollLowMemory() {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastLowMemPollMs < LOW_MEM_POLL_MS) return;
+        lastLowMemPollMs = now;
+        ActivityManager.MemoryInfo mi = memoryInfo();
+        if (mi != null && mi.lowMemory) main.post(this::autoPauseForMemory);
+    }
+
+    private ActivityManager.MemoryInfo memoryInfo() {
+        ActivityManager am = getSystemService(ActivityManager.class);
+        if (am == null) return null;
+        ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+        am.getMemoryInfo(mi);
+        return mi;
+    }
+
+    /**
      * Pause the running job to release the encoder's RAM. No-op unless we are
      * actively encoding video (the only phase that holds the large x265 pool and
      * can free it on pause) and not already paused.
@@ -219,13 +242,8 @@ public class ConversionService extends Service implements ConversionJob.Listener
             if (control == null) { autoPaused = false; return; } // file finished/cancelled
         }
 
-        ActivityManager am = getSystemService(ActivityManager.class);
-        boolean healthy = false;
-        if (am != null) {
-            ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
-            am.getMemoryInfo(mi);
-            healthy = !mi.lowMemory && mi.availMem > mi.threshold * RESUME_MULT;
-        }
+        ActivityManager.MemoryInfo mi = memoryInfo();
+        boolean healthy = mi != null && !mi.lowMemory && mi.availMem > mi.threshold * RESUME_MULT;
         healthyStreak = healthy ? healthyStreak + 1 : 0;
 
         boolean dwellOk = SystemClock.elapsedRealtime() - autoPauseAtMs >= MIN_PAUSE_MS;
@@ -350,6 +368,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
         }
         snapshot.status = paused ? Status.PAUSED : Status.RUNNING;
         snapshot.phase = phase;
+        if (phase == ConversionJob.Phase.VIDEO && !paused) pollLowMemory();
         snapshot.processedUs = processedUs;
         snapshot.durationUs = durationUs;
         snapshot.speed = speed;
