@@ -50,10 +50,10 @@ public class JobControl {
         }
     }
 
-    /** Blocks the calling (audio) thread while paused. */
+    /** Blocks the calling (audio / hardware video) thread while paused, until resumed, cancelled or stopped. */
     public void waitIfPaused() throws InterruptedException {
         synchronized (lock) {
-            while (paused && !cancelled) {
+            while (paused && !cancelled && !stopRequested) {
                 lock.wait();
             }
         }
