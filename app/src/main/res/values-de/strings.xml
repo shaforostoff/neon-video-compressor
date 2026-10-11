@@ -68,6 +68,7 @@
     <string name="ram_unknown">RAM: —</string>
     <string name="no_app_to_open">Keine App zum Öffnen dieser Datei</string>
     <string name="remove_both_error">Video und Audio können nicht gleichzeitig entfernt werden</string>
+    <string name="conversion_already_running">Es läuft bereits eine Konvertierung. Warte, bis sie fertig ist, oder stoppe sie zuerst.</string>
 
     <string name="battery_opt_title">Umwandlung bei gesperrtem Bildschirm fortsetzen</string>
     <string name="battery_opt_message">Die Videoumwandlung kann lange dauern. Damit Android sie bei ausgeschaltetem Bildschirm nicht anhält, erlaube dieser App, ohne Akku-Einschränkungen zu laufen.</string>

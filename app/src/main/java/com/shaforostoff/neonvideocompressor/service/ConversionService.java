@@ -19,6 +19,7 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.text.format.Formatter;
+import android.widget.Toast;
 
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.IntentCompat;
@@ -116,7 +117,7 @@ public class ConversionService extends Service implements ConversionJob.Listener
 
     private final Object controlLock = new Object();
     private JobControl control;
-    private Thread worker;
+    private volatile Thread worker; // cleared on the worker thread, checked on main
     private PowerManager.WakeLock wakeLock;
     private volatile boolean batchCancelled;
     private volatile boolean batchStopped; // graceful stop: keep the partial file, skip the rest
@@ -263,7 +264,11 @@ public class ConversionService extends Service implements ConversionJob.Listener
     }
 
     private void handleStart(Intent intent) {
-        if (worker != null) return; // already running
+        if (worker != null) {
+            // One batch at a time: say so instead of silently dropping the new selection.
+            Toast.makeText(this, R.string.conversion_already_running, Toast.LENGTH_LONG).show();
+            return;
+        }
 
         ArrayList<Uri> inputs = intent.getParcelableArrayListExtra(EXTRA_INPUT_URIS);
         Options options = IntentCompat.getParcelableExtra(intent, EXTRA_OPTIONS, Options.class);
