@@ -74,6 +74,13 @@ public class ConversionJob {
      */
     private static final long PROGRESS_INTERVAL_MS = 500;
 
+    /**
+     * How far the last encoded frame may fall short of the container duration
+     * before the output counts as cut short. The container duration also covers
+     * the audio, which can run a little past the last video frame.
+     */
+    private static final long SHORT_END_TOLERANCE_US = 2_000_000;
+
     // speed tracking (within the current pass)
     private Phase currentPhase = Phase.PROBING;
     private long lastUpdateMs = 0;
@@ -221,6 +228,12 @@ public class ConversionJob {
                         return;
                     }
                     partial = r == NativeConverter.RET_STOPPED;
+                    // MediaExtractor reports a read error as end of stream. An
+                    // encode that ends well short of the source keeps its file,
+                    // but as a partial one, so it is never offered as a replacement.
+                    if (!partial && durationUs - lastProcessedUs > SHORT_END_TOLERANCE_US) {
+                        partial = true;
+                    }
                 } else {
                     // --- Mux pass: stream-copy the kept tracks into the item.
                     setPhase(Phase.MUXING);

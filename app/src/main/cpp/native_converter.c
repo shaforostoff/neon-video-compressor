@@ -392,6 +392,7 @@ typedef struct {
     AVStream *out;       // matching output stream
     AVPacket *pkt;
     int eof;
+    int err;            // the read error that ended the stream early (0 on a clean EOF)
     int has_pending;
 } CopySource;
 
@@ -447,7 +448,12 @@ static int src_next(CopySource *s) {
     if (s->eof) return 0;
     while (1) {
         int r = av_read_frame(s->fmt, s->pkt);
-        if (r < 0) { s->eof = 1; s->has_pending = 0; return 0; }
+        if (r < 0) {
+            s->eof = 1;
+            s->has_pending = 0;
+            if (r != AVERROR_EOF) s->err = r;
+            return 0;
+        }
         if (s->pkt->stream_index == s->stream_index) { s->has_pending = 1; return 1; }
         av_packet_unref(s->pkt);
     }
@@ -780,7 +786,15 @@ static int transcode_core(JNIEnv *env, int inFd, int audioFd, int outFd, int crf
         }
 
         int r = av_read_frame(ifmt, pkt);
-        if (r < 0) break; // EOF or interrupted
+        if (r < 0) {
+            // Only a clean EOF (or a cancel, handled below) ends the encode: a
+            // read error must not finalize a cut-short file as complete.
+            if (r != AVERROR_EOF && !(ctrl && ctrl->cancel)) {
+                LOGE("%s: read failed: %s", tag, av_err2str(r));
+                goto end;
+            }
+            break;
+        }
         if (pkt->stream_index == vstream) {
             r = avcodec_send_packet(dec, pkt);
             av_packet_unref(pkt);
@@ -821,6 +835,7 @@ static int transcode_core(JNIEnv *env, int inFd, int audioFd, int outFd, int crf
             goto end;
         }
     }
+    if (a.err) { LOGE("%s: audio read failed: %s", tag, av_err2str(a.err)); goto end; }
 
     if (av_write_trailer(ofmt) < 0) goto end;
     ret = stopped ? RET_STOPPED : RET_OK;
@@ -910,6 +925,7 @@ Java_com_shaforostoff_neonvideocompressor_engine_NativeConverter_nativeRemux(
         if (src_write(s, ofmt) < 0) goto end;
         src_next(s);
     }
+    if (v.err || a.err) { LOGE("remux: read failed: %s", av_err2str(v.err ? v.err : a.err)); goto end; }
 
     if (av_write_trailer(ofmt) < 0) goto end;
     ret = RET_OK;
