@@ -56,44 +56,9 @@ public final class AudioEncoder {
             throws IOException, InterruptedException {
 
         MediaExtractor extractor = new MediaExtractor();
-        extractor.setDataSource(inFd);
-
-        int audioTrack = -1;
-        MediaFormat srcFormat = null;
-        for (int i = 0; i < extractor.getTrackCount(); i++) {
-            MediaFormat f = extractor.getTrackFormat(i);
-            String mime = f.getString(MediaFormat.KEY_MIME);
-            if (mime != null && mime.startsWith("audio/")) {
-                audioTrack = i;
-                srcFormat = f;
-                break;
-            }
-        }
-        if (audioTrack < 0) {
-            extractor.release();
-            return RESULT_NO_AUDIO;
-        }
-        extractor.selectTrack(audioTrack);
-
-        int sampleRate = srcFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE);
-        int channelCount = srcFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
-        String srcMime = srcFormat.getString(MediaFormat.KEY_MIME);
-
-        MediaCodec decoder = MediaCodec.createDecoderByType(srcMime);
-        decoder.configure(srcFormat, null, null, 0);
-        decoder.start();
-
-        MediaFormat encFormat = MediaFormat.createAudioFormat(
-                MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channelCount);
-        encFormat.setInteger(MediaFormat.KEY_AAC_PROFILE, aacProfile);
-        encFormat.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);
-        encFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 64 * 1024);
-
-        MediaCodec encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC);
-        encoder.configure(encFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-        encoder.start();
-
-        MediaMuxer muxer = new MediaMuxer(outPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+        MediaCodec decoder = null;
+        MediaCodec encoder = null; // created once the decoder's real PCM format is known
+        MediaMuxer muxer = null;
         int muxTrack = -1;
         boolean muxerStarted = false;
 
@@ -108,7 +73,30 @@ public final class AudioEncoder {
 
         int result = RESULT_OK;
 
+        // Everything is created inside the try so a codec that fails to configure
+        // (e.g. no decoder for the source's audio) doesn't leak the ones before it.
         try {
+            extractor.setDataSource(inFd);
+            int audioTrack = -1;
+            MediaFormat srcFormat = null;
+            for (int i = 0; i < extractor.getTrackCount(); i++) {
+                MediaFormat f = extractor.getTrackFormat(i);
+                String mime = f.getString(MediaFormat.KEY_MIME);
+                if (mime != null && mime.startsWith("audio/")) {
+                    audioTrack = i;
+                    srcFormat = f;
+                    break;
+                }
+            }
+            if (audioTrack < 0) return RESULT_NO_AUDIO;
+            extractor.selectTrack(audioTrack);
+
+            decoder = MediaCodec.createDecoderByType(srcFormat.getString(MediaFormat.KEY_MIME));
+            decoder.configure(srcFormat, null, null, 0);
+            decoder.start();
+
+            muxer = new MediaMuxer(outPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+
             while (!encoderDone) {
                 control.waitIfPaused();
                 if (control.cancelled) {
@@ -154,8 +142,20 @@ public final class AudioEncoder {
                     }
                 }
 
+                // The encoder takes the decoder's output rate and channel count,
+                // not the container's: HE-AAC with implicitly signalled SBR/PS
+                // decodes to e.g. 44.1 kHz stereo while the header says 22.05 kHz
+                // mono, and PCM fed to an encoder set up from the header plays
+                // back at the wrong speed. The output format is valid once a buffer has
+                // been dequeued, which a non-empty queue guarantees.
+                if (encoder == null && !pending.isEmpty()) {
+                    MediaFormat pcm = decoder.getOutputFormat();
+                    encoder = createEncoder(pcm.getInteger(MediaFormat.KEY_SAMPLE_RATE),
+                            pcm.getInteger(MediaFormat.KEY_CHANNEL_COUNT), aacProfile, bitRate);
+                }
+
                 // 3) pending PCM -> encoder input
-                while (!pending.isEmpty() && !encoderInputDone) {
+                while (encoder != null && !pending.isEmpty() && !encoderInputDone) {
                     int inIndex = encoder.dequeueInputBuffer(0);
                     if (inIndex < 0) break;
                     Chunk c = pending.pollFirst();
@@ -172,6 +172,7 @@ public final class AudioEncoder {
                 }
 
                 // 4) encoder output -> muxer
+                if (encoder == null) continue;
                 int encIndex = encoder.dequeueOutputBuffer(encInfo, TIMEOUT_US);
                 if (encIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     muxTrack = muxer.addTrack(encoder.getOutputFormat());
@@ -207,6 +208,24 @@ public final class AudioEncoder {
             Quietly.release(extractor);
         }
         return result;
+    }
+
+    private static MediaCodec createEncoder(int sampleRate, int channelCount, int aacProfile,
+                                            int bitRate) throws IOException {
+        MediaFormat format = MediaFormat.createAudioFormat(
+                MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channelCount);
+        format.setInteger(MediaFormat.KEY_AAC_PROFILE, aacProfile);
+        format.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);
+        format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 64 * 1024);
+        MediaCodec encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC);
+        try {
+            encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            encoder.start();
+        } catch (RuntimeException e) {
+            encoder.release();
+            throw e;
+        }
+        return encoder;
     }
 
     private AudioEncoder() {
