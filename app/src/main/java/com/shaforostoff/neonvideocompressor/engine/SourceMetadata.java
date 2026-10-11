@@ -104,25 +104,24 @@ public final class SourceMetadata {
      * uri. The picker redacts DISPLAY_NAME (it returns "<pickerId>.mp4"), so a
      * name lookup is useless — but for local items the picker id IS the
      * MediaStore {@code _ID} (verified on Android 15), so try that first and
-     * sanity-check by SIZE. Otherwise match by exact SIZE (a strong signal on its
-     * own), narrowed by duration when several items share it. Returns null on no
-     * match or on any ambiguity: a wrong item is worse than none.
+     * require the SIZE to match. Otherwise match by exact SIZE (a strong signal on
+     * its own), narrowed by duration when several items share it. Returns null on
+     * no match, on any ambiguity, or when the size is unknown (a share uri's
+     * trailing number alone can name any video): a wrong item is worse than none.
      */
     public static Uri findMediaStoreVideo(Context context, Uri uri) {
         long size = querySize(context, uri);
+        if (size <= 0) return null;
         Uri videos = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL);
         try {
             Uri candidate = ContentUris.withAppendedId(videos, ContentUris.parseId(uri));
             try (Cursor c = context.getContentResolver().query(candidate,
                     new String[]{MediaStore.MediaColumns.SIZE}, null, null, null)) {
-                if (c != null && c.moveToFirst() && (size <= 0 || c.getLong(0) == size)) {
-                    return candidate;
-                }
+                if (c != null && c.moveToFirst() && c.getLong(0) == size) return candidate;
             }
         } catch (Exception ignored) {
         }
 
-        if (size <= 0) return null;
         try (Cursor c = context.getContentResolver().query(videos,
                 new String[]{MediaStore.MediaColumns._ID, MediaStore.Video.Media.DURATION},
                 MediaStore.MediaColumns.SIZE + "=?", new String[]{String.valueOf(size)}, null)) {
