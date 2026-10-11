@@ -141,6 +141,11 @@ public class ConversionJob {
                 listener.onError(context.getString(R.string.error_no_video_track));
                 return;
             }
+            // Some containers (e.g. MKV without a duration header) give the native
+            // probe nothing; ask the platform's retriever before giving up.
+            if (durationUs <= 0) {
+                durationUs = SourceMetadata.probeDurationAndBitrate(context, inputUri)[0] * 1000;
+            }
             if (durationUs <= 0) durationUs = 1; // avoid div-by-zero in fractions
 
             boolean encodeVideo = options.encodesVideo();
